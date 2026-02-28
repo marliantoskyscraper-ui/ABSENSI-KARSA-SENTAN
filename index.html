@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Aplikasi Absensi Digital Berbasis Lokasi dan Foto Terhubung Google Sheets">
+    <meta name="description" content="Aplikasi Absensi Digital Terhubung Google Sheets">
     
     <!-- TAG ANTI-CACHE -->
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
 
-    <title>Aplikasi Absensi (Google Sheets)</title>
+    <title>Aplikasi Absensi Terpadu</title>
     
     <!-- Pustaka Eksternal -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -25,20 +25,14 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
-        // =====================================================================
-        // 1. KONFIGURASI GOOGLE SHEETS API
-        // =====================================================================
-        
-        // GANTI LINK INI DENGAN URL DEPLOYMENT GOOGLE APPS SCRIPT ANDA
-        const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbz9FlGbHy8qg1Y5Ys8FobgtlYi7hmPtsvd9tNUXdAOFL3rlyJlp_31M_LXiA87RAkhu0g/exec"; 
-        
-        const isApiConfigured = SCRIPT_URL && SCRIPT_URL.startsWith("https://script.google.com/");
-
-        // --- 2. FUNGSI UTILITAS ---
-        // Penanganan Local Storage (Fallback jika Sheets belum ada)
+        // --- 1. FUNGSI UTILITAS ---
+        // Penanganan Local Storage 
         const getStorage = (key, defaultVal) => {
             try { const item = localStorage.getItem(key); return item ? JSON.parse(item) : defaultVal; } 
             catch(e) { return defaultVal; }
+        };
+        const setStorage = (key, val) => {
+            try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {}
         };
 
         // Menghitung Jarak GPS (Meter)
@@ -54,7 +48,7 @@
         // Export Data ke CSV
         function exportKeCSV(data, namaFile) {
             if (!data || data.length === 0) return alert("Tidak ada data untuk diekspor!");
-            const dataBersih = data.map(({ id, foto, timestamp, ...sisa }) => sisa); 
+            const dataBersih = data.map(({ id, dbId, foto, timestamp, ...sisa }) => sisa); 
             const header = Object.keys(dataBersih[0]).join(',');
             const baris = dataBersih.map(obj => Object.values(obj).map(val => `"${val}"`).join(',')).join('\n');
             const blob = new Blob([header + '\n' + baris], { type: 'text/csv;charset=utf-8;' });
@@ -62,25 +56,29 @@
             link.href = URL.createObjectURL(blob); link.download = namaFile; link.click();
         }
 
-        // Komponen Toast
+        // Komponen Toast (Notifikasi)
         const ToastUI = ({ pesan }) => {
             if (!pesan) return null;
             return (
                 <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full shadow-2xl z-50 flex items-center text-sm font-medium animate-bounce border border-slate-700">
-                    <i className="fas fa-check-circle mr-2 text-emerald-400"></i> {pesan}
+                    <i className="fas fa-info-circle mr-2 text-blue-400"></i> {pesan}
                 </div>
             );
         };
 
-        // --- 3. KOMPONEN UTAMA (Aplikasi Root) ---
+        // --- 2. KOMPONEN UTAMA (Aplikasi Root) ---
         function AplikasiAbsensi() {
           const [penggunaAktif, setPenggunaAktif] = useState(null); 
           const [notifikasi, setNotifikasi] = useState('');
           
-          const [statusCloud, setStatusCloud] = useState(isApiConfigured ? 'Menginisialisasi...' : 'Mode Lokal Aktif');
+          // SETTING URL API DINAMIS (Disimpan di LocalStorage)
+          const [scriptUrl, setScriptUrl] = useState(() => getStorage('absen_api_url', ''));
+          const isApiConfigured = scriptUrl && scriptUrl.startsWith("https://script.google.com/");
+
+          const [statusCloud, setStatusCloud] = useState(isApiConfigured ? 'Menghubungkan...' : 'Mode Lokal (Offline)');
           const [isSinkronisasi, setIsSinkronisasi] = useState(false);
 
-          // State Data (Bisa dari LocalStorage atau Google Sheets)
+          // State Data (Local Storage sebagai Fallback/Cache)
           const [akunStorage, setAkunStorage] = useState(() => getStorage('absen_akun', [{ id: 'admin_1', username: 'admin', password: 'Karsa43', name: 'Administrator', role: 'admin' }]));
           const [logs, setLogs] = useState(() => getStorage('absen_logs', []));
           const [pengajuan, setPengajuan] = useState(() => getStorage('absen_reqs', []));
@@ -89,58 +87,67 @@
           const BATAS_JARAK_METER = 100;
 
           // Auto-Save Backup ke Local Storage
-          useEffect(() => { localStorage.setItem('absen_akun', JSON.stringify(akunStorage)); }, [akunStorage]);
-          useEffect(() => { localStorage.setItem('absen_logs', JSON.stringify(logs)); }, [logs]);
-          useEffect(() => { localStorage.setItem('absen_reqs', JSON.stringify(pengajuan)); }, [pengajuan]);
-          useEffect(() => { localStorage.setItem('absen_reps', JSON.stringify(laporan)); }, [laporan]);
-          useEffect(() => { localStorage.setItem('absen_loc', JSON.stringify(lokasiKantor)); }, [lokasiKantor]);
+          useEffect(() => setStorage('absen_api_url', scriptUrl), [scriptUrl]);
+          useEffect(() => setStorage('absen_akun', akunStorage), [akunStorage]);
+          useEffect(() => setStorage('absen_logs', logs), [logs]);
+          useEffect(() => setStorage('absen_reqs', pengajuan), [pengajuan]);
+          useEffect(() => setStorage('absen_reps', laporan), [laporan]);
+          useEffect(() => setStorage('absen_loc', lokasiKantor), [lokasiKantor]);
 
-          // Fungsi Tarik Data dari Google Sheets (GET)
+          const tampilkanToast = (pesan) => { setNotifikasi(pesan); setTimeout(() => setNotifikasi(''), 3000); };
+
+          // Tarik Data dari Google Sheets (GET)
           const sinkronisasiData = useCallback(async (sembunyiStatus = false) => {
-              if(!isApiConfigured) return;
+              if(!isApiConfigured) {
+                  setStatusCloud('Mode Lokal (Offline)');
+                  return;
+              }
               if(!sembunyiStatus) setStatusCloud('Menyinkronkan data...');
               setIsSinkronisasi(true);
               
               try {
-                  const respon = await fetch(SCRIPT_URL + "?action=getAll");
+                  const respon = await fetch(scriptUrl + "?action=getAll");
+                  if (!respon.ok) throw new Error("Gagal mengambil data dari URL.");
                   const hasil = await respon.json();
                   const urutWaktu = (a, b) => b.timestamp - a.timestamp;
                   
                   if(hasil.users && hasil.users.length > 0) setAkunStorage(hasil.users);
-                  if(hasil.logs && hasil.logs.length > 0) setLogs(hasil.logs.sort(urutWaktu));
-                  if(hasil.requests && hasil.requests.length > 0) setPengajuan(hasil.requests.sort(urutWaktu));
-                  if(hasil.reports && hasil.reports.length > 0) setLaporan(hasil.reports.sort(urutWaktu));
+                  if(hasil.logs) setLogs(hasil.logs.sort(urutWaktu));
+                  if(hasil.requests) setPengajuan(hasil.requests.sort(urutWaktu));
+                  if(hasil.reports) setLaporan(hasil.reports.sort(urutWaktu));
                   if(hasil.settings && hasil.settings.lokasi_kantor) setLokasiKantor(hasil.settings.lokasi_kantor);
 
-                  setStatusCloud('Terhubung ke Sheets (Live)');
+                  setStatusCloud('Terhubung ke Sheets');
               } catch (error) {
-                  console.error("Gagal menarik data:", error);
-                  setStatusCloud('Gangguan Koneksi ke Sheets');
+                  console.error("Fetch Error:", error);
+                  setStatusCloud('Gagal Koneksi. Cek Link API!');
               } finally {
                   setIsSinkronisasi(false);
               }
-          }, []);
+          }, [scriptUrl, isApiConfigured]);
 
+          // Auto-Polling 8 detik
           useEffect(() => {
-              if(!isApiConfigured) return;
               sinkronisasiData(false); 
+              if(!isApiConfigured) return;
               const interval = setInterval(() => { sinkronisasiData(true); }, 8000); 
               return () => clearInterval(interval);
-          }, [sinkronisasiData]);
+          }, [sinkronisasiData, isApiConfigured]);
 
-          // EKSEKUSI TULIS DATA
-          const tampilkanToast = (pesan) => { setNotifikasi(pesan); setTimeout(() => setNotifikasi(''), 3000); };
-          
+          // POST Data ke Google Sheets
           const postDataKeSheet = async (action, data) => {
-             if(!isApiConfigured) return; // Jika tidak disetup, tetap simpan di lokal
+             if(!isApiConfigured) return;
              try {
-                await fetch(SCRIPT_URL, {
+                await fetch(scriptUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                     body: JSON.stringify({ action: action, data: data })
                 });
                 sinkronisasiData(true); 
-             } catch(e) { console.error("Gagal simpan ke sheets", e); }
+             } catch(e) { 
+                 console.error("Gagal POST ke sheets", e); 
+                 tampilkanToast("Terjadi kendala jaringan saat menyimpan ke Sheets.");
+             }
           };
 
           const aksi = {
@@ -172,7 +179,13 @@
                 await postDataKeSheet('updateRequestStatus', { id, status }); 
                 tampilkanToast("Status diperbarui!"); 
              },
-             updateLokasi: async (koordinat) => { 
+             updatePengaturan: async (koordinat, newUrl) => { 
+                if (newUrl !== scriptUrl) {
+                    setScriptUrl(newUrl);
+                    tampilkanToast("URL API Diperbarui! Sistem akan dimuat ulang...");
+                    setTimeout(() => window.location.reload(), 1500);
+                    return;
+                }
                 setLokasiKantor(koordinat);
                 await postDataKeSheet('updateLokasi', { koordinat }); 
                 tampilkanToast("Pusat GPS Kantor Diperbarui!"); 
@@ -184,10 +197,10 @@
              }
           };
 
-          // Banner Peringatan jika belum set API
+          // Banner Peringatan
           const ModeBanner = () => !isApiConfigured ? (
-             <div className="bg-amber-500 text-white text-center text-[10px] font-bold py-1 w-full z-50">
-                 MODE UJI COBA (LOKAL) - Harap masukkan URL Google Sheets pada baris 33 untuk sinkronisasi.
+             <div className="bg-amber-500 text-white text-center text-[10px] sm:text-xs font-bold py-1.5 px-2 w-full z-50 shadow-md">
+                 <i className="fas fa-exclamation-triangle mr-1"></i> Mode Offline. Login sebagai Admin (`admin` / `Karsa43`) untuk mengatur koneksi Google Sheets.
              </div>
           ) : null;
 
@@ -211,6 +224,7 @@
                   onLogout={() => setPenggunaAktif(null)} 
                   data={{ logs, pengajuan, laporan }} 
                   lokasiKantor={lokasiKantor}
+                  scriptUrl={scriptUrl}
                   aksi={aksi} exportCSV={exportKeCSV}
                   isSinkron={isSinkronisasi}
                   forceRefresh={()=>sinkronisasiData(false)}
@@ -227,7 +241,7 @@
           );
         }
 
-        // --- 4. KOMPONEN: LAYAR LOGIN & REGISTER ---
+        // --- 3. KOMPONEN: LAYAR LOGIN & REGISTER ---
         function LayarLogin({ setPenggunaAktif, dataAkun, aksiDaftar, statusCloud, forceRefresh }) {
           const [modeRegister, setModeRegister] = useState(false);
           const [form, setForm] = useState({ nama: '', departemen: '', username: '', password: '' });
@@ -288,21 +302,21 @@
                     </button>
                   </form>
                   
-                  <div className="mt-6 text-center">
+                  <div className="mt-6 text-center flex flex-col space-y-3">
                     <button onClick={() => { setModeRegister(!modeRegister); setPesanError(''); setPesanSukses(''); }} className="text-sm font-bold text-slate-500 hover:text-emerald-600 transition-colors">
                       {modeRegister ? 'Sudah punya akun? Masuk' : 'Karyawan Baru? Buat Akun'}
                     </button>
                   </div>
                 </div>
               </div>
-              <div className={`px-5 py-2.5 rounded-full text-xs font-bold flex items-center shadow-sm cursor-pointer ${statusCloud.includes('Terhubung') || statusCloud.includes('Lokal') ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-amber-100 text-amber-700 border border-amber-200'}`} onClick={forceRefresh}>
-                 <i className={`fas ${statusCloud.includes('Terhubung') || statusCloud.includes('Lokal') ? 'fa-check-circle' : 'fa-sync-alt fa-spin'} mr-2`}></i> {statusCloud}
+              <div className={`px-5 py-2.5 rounded-full text-xs font-bold flex items-center shadow-sm cursor-pointer ${statusCloud.includes('Terhubung') ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-slate-200 text-slate-600 border border-slate-300'}`} onClick={forceRefresh}>
+                 <i className={`fas ${statusCloud.includes('Terhubung') ? 'fa-check-circle' : statusCloud.includes('Gagal') ? 'fa-times-circle text-rose-500' : 'fa-sync-alt'} mr-2`}></i> {statusCloud}
               </div>
             </div>
           );
         }
 
-        // --- 5. KOMPONEN: DASHBOARD KARYAWAN ---
+        // --- 4. KOMPONEN: DASHBOARD KARYAWAN ---
         function DashboardKaryawan({ user, onLogout, lokasiKantor, batasJarak, aksi, showToast, isSinkron }) {
           const [tab, setTab] = useState('absen');
 
@@ -382,11 +396,10 @@
           }, [kamera.aktif, kamera.fotoB64]);
 
           const bukaKamera = (jenisAbsen) => {
-            // BYPASS PENTING: Jangan blokir jika GPS error, cukup beri peringatan.
             if (statusLokasi.pesan) {
-                showToast("Peringatan: GPS Gagal! Absen tetap bisa dilakukan (Status: Lokasi Tidak Diketahui)");
+                showToast("Peringatan: Sinyal GPS tidak tersedia! Absen akan ditandai.");
             } else if (statusLokasi.jarak > batasJarak) {
-                showToast(`Anda di luar kantor (${statusLokasi.jarak}m). Log ditandai luar jangkauan!`);
+                showToast(`Peringatan: Anda di luar kantor (${statusLokasi.jarak}m). Log ditandai luar jangkauan!`);
             }
             setKamera({ aktif: true, jenis: jenisAbsen, fotoB64: null });
           };
@@ -395,7 +408,7 @@
             if (!refVideo.current) return;
             const cvs = document.createElement('canvas');
             
-            // KOMPRESI EKSTRA
+            // Kompresi ketat untuk Sheets API
             const MAX_WIDTH = 250; 
             const scaleSize = MAX_WIDTH / refVideo.current.videoWidth;
             cvs.width = MAX_WIDTH;
@@ -406,7 +419,6 @@
             
             setKamera({ ...kamera, fotoB64: base64 });
 
-            // Menentukan Status GPS pada saat absen
             let statusPenilaian = 'Tepat Lokasi';
             if (statusLokasi.pesan) statusPenilaian = 'GPS Tidak Aktif';
             else if (statusLokasi.jarak > batasJarak) statusPenilaian = 'Luar Jangkauan';
@@ -436,7 +448,7 @@
                   <div className="h-32 bg-slate-900 flex justify-center items-center pb-6">
                      {!kamera.fotoB64 ? (
                         <button onClick={jepretFoto} className="w-20 h-20 bg-white rounded-full border-4 border-slate-500 flex items-center justify-center active:scale-95 transition-transform"><div className="w-16 h-16 border-2 border-slate-900 rounded-full"></div></button>
-                     ) : <div className="text-emerald-400 font-bold flex flex-col items-center animate-pulse"><i className="fas fa-cloud-upload-alt text-3xl mb-1"></i>Menyimpan...</div>}
+                     ) : <div className="text-emerald-400 font-bold flex flex-col items-center animate-pulse"><i className="fas fa-check-circle text-3xl mb-1"></i>Menyimpan...</div>}
                   </div>
                </div>
              );
@@ -525,11 +537,16 @@
            );
         }
 
-        // --- 6. KOMPONEN: DASHBOARD ADMIN ---
-        function DashboardAdmin({ onLogout, data, lokasiKantor, aksi, exportCSV, isSinkron, forceRefresh }) {
+        // --- 5. KOMPONEN: DASHBOARD ADMIN ---
+        function DashboardAdmin({ onLogout, data, lokasiKantor, scriptUrl, aksi, exportCSV, isSinkron, forceRefresh }) {
           const [tabAktif, setTabAktif] = useState('pantau');
           const [modalLokasi, setModalLokasi] = useState(false);
-          const [formLokasi, setFormLokasi] = useState(lokasiKantor);
+          
+          const [formPengaturan, setFormPengaturan] = useState({
+              lat: lokasiKantor.lat,
+              lng: lokasiKantor.lng,
+              api_url: scriptUrl
+          });
 
           const MenuSidebar = [
              { id: 'pantau', ikon: 'fa-satellite-dish', judul: 'Monitor Live' },
@@ -543,7 +560,7 @@
                 <div className="w-64 bg-slate-900 text-white hidden md:flex flex-col shadow-2xl z-20">
                    <div className="p-6 border-b border-slate-800 flex items-center">
                       <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center mr-3 shadow-lg shadow-emerald-500/50"><i className="fas fa-file-excel text-xl"></i></div>
-                      <div><h1 className="font-black text-lg leading-tight">AdminHub</h1><p className="text-[9px] font-bold text-emerald-400 uppercase tracking-widest mt-0.5"><i className="fas fa-wifi mr-1"></i>Sistem Database</p></div>
+                      <div><h1 className="font-black text-lg leading-tight">AdminHub</h1><p className="text-[9px] font-bold text-emerald-400 uppercase tracking-widest mt-0.5"><i className="fas fa-wifi mr-1"></i>Server Panel</p></div>
                    </div>
                    <div className="flex-1 py-6 px-4 space-y-2">
                       {MenuSidebar.map(menu => (
@@ -552,9 +569,9 @@
                          </button>
                       ))}
                       <div className="pt-8">
-                         <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-4 mb-2">Konfigurasi</p>
-                         <button onClick={()=>setModalLokasi(true)} className="w-full flex items-center px-4 py-2.5 rounded-xl text-sm font-bold text-slate-400 hover:bg-slate-800 hover:text-white transition-all"><i className="fas fa-map-marker-alt w-6 text-left"></i> Kordinat Kantor</button>
-                         <button onClick={()=>{ if(window.confirm('Yakin hapus SEMUA riwayat absen di Database?')) aksi.resetAbsen(); }} className="w-full flex items-center px-4 py-2.5 rounded-xl text-sm font-bold text-rose-400 hover:bg-rose-500/10 transition-all mt-1"><i className="fas fa-trash-alt w-6 text-left"></i> Kosongkan Log</button>
+                         <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-4 mb-2">Konfigurasi Sistem</p>
+                         <button onClick={()=>setModalLokasi(true)} className="w-full flex items-center px-4 py-2.5 rounded-xl text-sm font-bold text-slate-400 hover:bg-slate-800 hover:text-white transition-all"><i className="fas fa-cog w-6 text-left"></i> Pengaturan Pusat</button>
+                         <button onClick={()=>{ if(window.confirm('Yakin hapus SEMUA riwayat absen?')) aksi.resetAbsen(); }} className="w-full flex items-center px-4 py-2.5 rounded-xl text-sm font-bold text-rose-400 hover:bg-rose-500/10 transition-all mt-1"><i className="fas fa-trash-alt w-6 text-left"></i> Kosongkan Log</button>
                       </div>
                    </div>
                    <div className="p-4"><button onClick={onLogout} className="w-full py-3 bg-slate-800 text-slate-300 font-bold rounded-xl hover:bg-rose-600 hover:text-white transition-all flex items-center justify-center"><i className="fas fa-power-off mr-2"></i> KELUAR</button></div>
@@ -575,7 +592,7 @@
                    <main className="flex-1 overflow-y-auto p-4 md:p-8 relative bg-slate-50/50">
                       <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-6 md:mb-8 gap-4">
                          <div>
-                            <h2 className="text-2xl md:text-3xl font-black text-slate-800 tracking-tight">{MenuSidebar.find(i=>i.id===tabAktif)?.judul || 'Pengaturan'}</h2>
+                            <h2 className="text-2xl md:text-3xl font-black text-slate-800 tracking-tight">{MenuSidebar.find(i=>i.id===tabAktif)?.judul || 'Panel Administrator'}</h2>
                             <div className="flex items-center mt-1">
                                 <p className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center mr-3"><i className="fas fa-table text-emerald-500 mr-2"></i>Database Aktif</p>
                                 {isSinkron && <span className="text-[10px] font-bold text-emerald-500 bg-emerald-50 px-2 py-0.5 rounded-full flex items-center"><i className="fas fa-sync fa-spin mr-1"></i> Sinkronisasi...</span>}
@@ -598,13 +615,13 @@
                                      </tr>
                                   </thead>
                                   <tbody className="divide-y divide-slate-50">
-                                     {data.logs.length === 0 ? <tr><td colSpan="5" className="p-12 text-center text-slate-400 font-bold"><i className="fas fa-folder-open text-4xl mb-3 block opacity-20"></i>Belum ada data masuk di Server.</td></tr> : 
+                                     {data.logs.length === 0 ? <tr><td colSpan="5" className="p-12 text-center text-slate-400 font-bold"><i className="fas fa-folder-open text-4xl mb-3 block opacity-20"></i>Belum ada data masuk.</td></tr> : 
                                      data.logs.map((lg, idx) => (
                                         <tr key={lg.id || idx} className="hover:bg-slate-50/50 transition-colors">
                                            <td className="p-5 pl-6 font-black text-slate-800 text-sm">{lg.userName}</td>
                                            <td className="p-5 text-xs font-bold text-slate-500"><i className="far fa-calendar-alt mr-1"></i> {lg.date} <span className="mx-1 text-slate-300">|</span> <i className="far fa-clock mr-1"></i> {lg.time}</td>
                                            <td className="p-5"><span className={`px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider ${lg.type && lg.type.includes('Masuk') ? 'bg-emerald-100 text-emerald-700' : lg.type && lg.type.includes('Pulang') ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>{lg.type}</span></td>
-                                           <td className="p-5"><span className={`text-xs font-black flex items-center ${lg.status==='Tepat Lokasi'?'text-emerald-500':'text-rose-500'}`}><i className={`fas ${lg.status==='Tepat Lokasi'?'fa-check-circle': lg.status==='GPS Tidak Aktif' ? 'fa-exclamation-triangle' : 'fa-times-circle'} mr-1.5`}></i>{lg.status}</span></td>
+                                           <td className="p-5"><span className={`text-xs font-black flex items-center ${lg.status==='Tepat Lokasi'?'text-emerald-500':lg.status==='GPS Tidak Aktif'?'text-amber-500':'text-rose-500'}`}><i className={`fas ${lg.status==='Tepat Lokasi'?'fa-check-circle':lg.status==='GPS Tidak Aktif'?'fa-exclamation-triangle':'fa-times-circle'} mr-1.5`}></i>{lg.status}</span></td>
                                            <td className="p-5 pr-6 flex justify-end">
                                              {lg.foto ? (
                                              <div className="w-10 h-10 rounded-xl overflow-hidden border-2 border-slate-100 shadow-sm bg-slate-50 hover:scale-[2] hover:-translate-x-4 transition-transform origin-right cursor-zoom-in">
@@ -664,21 +681,37 @@
                       )}
                    </main>
 
-                   {/* Komponen Modal Kordinat */}
+                   {/* Komponen Modal Pengaturan */}
                    {modalLokasi && (
                       <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                         <div className="bg-white w-full max-w-sm rounded-[2rem] overflow-hidden shadow-2xl scale-100 animate-in zoom-in-95">
+                         <div className="bg-white w-full max-w-md rounded-[2rem] overflow-hidden shadow-2xl scale-100 animate-in zoom-in-95">
                             <div className="bg-slate-900 p-6 flex justify-between items-center text-white">
-                               <h3 className="font-black"><i className="fas fa-map-marker-alt text-emerald-400 mr-2"></i> Pengaturan Pusat GPS</h3>
+                               <h3 className="font-black"><i className="fas fa-cog text-emerald-400 mr-2"></i> Pengaturan Sistem</h3>
                                <button onClick={()=>setModalLokasi(false)} className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center hover:bg-white/20 transition-colors"><i className="fas fa-times"></i></button>
                             </div>
-                            <div className="p-8">
-                               <p className="text-xs font-medium text-slate-500 mb-6 leading-relaxed">Tentukan koordinat pusat kantor. Sistem di HP karyawan akan mengukur jarak (maks. 100m) dari titik ini saat mereka absen.</p>
-                               <div className="space-y-5">
-                                  <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Garis Lintang (Latitude)</label><input type="number" step="any" value={formLokasi.lat} onChange={(e)=>setFormLokasi({...formLokasi, lat: parseFloat(e.target.value)})} className="w-full border-2 border-slate-100 rounded-xl bg-slate-50 p-4 outline-none focus:border-emerald-500 font-bold text-slate-700 transition-colors" /></div>
-                                  <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Garis Bujur (Longitude)</label><input type="number" step="any" value={formLokasi.lng} onChange={(e)=>setFormLokasi({...formLokasi, lng: parseFloat(e.target.value)})} className="w-full border-2 border-slate-100 rounded-xl bg-slate-50 p-4 outline-none focus:border-emerald-500 font-bold text-slate-700 transition-colors" /></div>
+                            <div className="p-8 h-96 overflow-y-auto">
+                               
+                               {/* Bagian API URL */}
+                               <div className="mb-6 pb-6 border-b border-slate-100">
+                                   <h4 className="text-sm font-black text-slate-800 mb-2"><i className="fas fa-link text-emerald-500 mr-2"></i>Koneksi Google Sheets</h4>
+                                   <p className="text-[10px] font-medium text-slate-500 mb-3 leading-relaxed">Masukkan "URL Aplikasi Web" dari Google Apps Script Anda. Pastikan akses diatur ke "Anyone" (Siapa saja).</p>
+                                   <input type="text" placeholder="https://script.google.com/..." value={formPengaturan.api_url} onChange={(e)=>setFormPengaturan({...formPengaturan, api_url: e.target.value})} className="w-full border-2 border-slate-200 rounded-xl bg-slate-50 p-4 text-xs outline-none focus:border-emerald-500 font-mono text-slate-700 transition-colors" />
                                </div>
-                               <button onClick={()=>{ aksi.updateLokasi(formLokasi); setModalLokasi(false); }} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-4 rounded-xl shadow-lg mt-8 transition-all active:scale-95">SIMPAN PENGATURAN</button>
+
+                               {/* Bagian Koordinat */}
+                               <div>
+                                   <h4 className="text-sm font-black text-slate-800 mb-2"><i className="fas fa-map-marker-alt text-emerald-500 mr-2"></i>Pusat GPS Kantor</h4>
+                                   <p className="text-[10px] font-medium text-slate-500 mb-3 leading-relaxed">Sistem di HP karyawan akan mengukur jarak (maks. 100m) dari titik ini.</p>
+                                   <div className="space-y-4">
+                                      <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Garis Lintang (Latitude)</label><input type="number" step="any" value={formPengaturan.lat} onChange={(e)=>setFormPengaturan({...formPengaturan, lat: parseFloat(e.target.value)})} className="w-full border-2 border-slate-100 rounded-xl bg-slate-50 p-4 outline-none focus:border-emerald-500 font-bold text-slate-700 transition-colors" /></div>
+                                      <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Garis Bujur (Longitude)</label><input type="number" step="any" value={formPengaturan.lng} onChange={(e)=>setFormPengaturan({...formPengaturan, lng: parseFloat(e.target.value)})} className="w-full border-2 border-slate-100 rounded-xl bg-slate-50 p-4 outline-none focus:border-emerald-500 font-bold text-slate-700 transition-colors" /></div>
+                                   </div>
+                               </div>
+
+                               <button onClick={()=>{ 
+                                   aksi.updatePengaturan({ lat: formPengaturan.lat, lng: formPengaturan.lng }, formPengaturan.api_url); 
+                                   setModalLokasi(false); 
+                               }} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-4 rounded-xl shadow-lg mt-8 transition-all active:scale-95">SIMPAN PENGATURAN</button>
                             </div>
                          </div>
                       </div>
