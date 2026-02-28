@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Aplikasi Absensi Digital Berbasis Lokasi dan Foto">
+    
+    <!-- TAG ANTI-CACHE (Penting untuk mengatasi masalah GitHub Pages) -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+
+    <title>Aplikasi Absensi Cloud</title>
+    
+    <!-- Pustaka Eksternal -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Modul Firebase -->
+    <script type="importmap">
+      {
+        "imports": {
+          "firebase/app": "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js",
+          "firebase/auth": "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js",
+          "firebase/firestore": "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"
+        }
+      }
+    </script>
+</head>
+<body class="bg-slate-100 antialiased font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel" data-type="module">
+        import { initializeApp } from 'firebase/app';
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+        import { getFirestore, collection, onSnapshot, addDoc, updateDoc, doc, setDoc, deleteDoc, getDocs } from 'firebase/firestore';
+
+        const { useState, useEffect, useRef } = React;
+
+        // --- 1. INISIALISASI DATABASE ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'sistem-absensi-final';
+
+        // --- 2. FUNGSI UTILITAS (Deduplikasi) ---
+        // Menghitung Jarak GPS (Meter)
+        function hitungJarakMeter(lat1, lon1, lat2, lon2) {
+          const R = 6371000; 
+          const dLat = (lat2 - lat1) * Math.PI / 180;
+          const dLon = (lon2 - lon1) * Math.PI / 180;
+          const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + 
+                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+          return Math.round(R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)))); 
+        }
+
+        // Export Data ke CSV
+        function exportKeCSV(data, namaFile) {
+            if (!data || data.length === 0) return alert("Tidak ada data untuk diekspor!");
+            const dataBersih = data.map(({ dbId, photo, ...sisa }) => sisa); // Buang foto agar CSV tidak error
+            const header = Object.keys(dataBersih[0]).join(',');
+            const baris = dataBersih.map(obj => Object.values(obj).map(val => `"${val}"`).join(',')).join('\n');
+            const blob = new Blob([header + '\n' + baris], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob); link.download = namaFile; link.click();
+        }
+
+        // Komponen Toast Global (Notifikasi)
+        const ToastUI = ({ pesan }) => {
+            if (!pesan) return null;
+            return (
+                <div className="fixed top-4 left-1/2 transform -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full shadow-2xl z-50 flex items-center text-sm font-medium animate-bounce">
+                    <i className="fas fa-check-circle mr-2 text-green-400"></i> {pesan}
+                </div>
+            );
+        };
+
+        // --- 3. KOMPONEN UTAMA (Aplikasi Root) ---
+        function AplikasiAbsensi() {
+          const [penggunaAktif, setPenggunaAktif] = useState(null); 
+          const [statusCloud, setStatusCloud] = useState('Menghubungkan ke server...');
+          const [notifikasi, setNotifikasi] = useState('');
+
+          // State Data Cloud
+          const [logs, setLogs] = useState([]);
+          const [pengajuan, setPengajuan] = useState([]);
+          const [laporan, setLaporan] = useState([]);
+          const [lokasiKantor, setLokasiKantor] = useState({ lat: -6.200000, lng: 106.816666 });
+          const BATAS_JARAK_METER = 100; // Radius absen valid
+
+          // Hubungkan ke Firebase Auth (Wajib sebelum akses database)
+          useEffect(() => {
+            const jalankanAuth = async () => {
+              try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                  await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                  await signInAnonymously(auth);
+                }
+              } catch (err) { console.error("Auth gagal:", err); setStatusCloud('Koneksi Gagal'); }
+            };
+            jalankanAuth();
+            
+            const unsub = onAuthStateChanged(auth, (user) => {
+               if(user) setStatusCloud('Terkoneksi (Aman)');
+            });
+            return () => unsub();
+          }, []);
+
+          // Tarik Data Realtime (Read)
+          useEffect(() => {
+            if (!auth.currentUser) return;
+            const referensi = {
+              logs: collection(db, 'artifacts', appId, 'public', 'data', 'logs'),
+              reqs: collection(db, 'artifacts', appId, 'public', 'data', 'requests'),
+              reps: collection(db, 'artifacts', appId, 'public', 'data', 'reports'),
+              set: collection(db, 'artifacts', appId, 'public', 'data', 'settings')
+            };
+
+            const urutBaru = (a, b) => b.timestamp - a.timestamp;
+            
+            const uLogs = onSnapshot(referensi.logs, snap => setLogs(snap.docs.map(d => ({ dbId: d.id, ...d.data() })).sort(urutBaru)));
+            const uReqs = onSnapshot(referensi.reqs, snap => setPengajuan(snap.docs.map(d => ({ dbId: d.id, ...d.data() })).sort(urutBaru)));
+            const uReps = onSnapshot(referensi.reps, snap => setLaporan(snap.docs.map(d => ({ dbId: d.id, ...d.data() })).sort(urutBaru)));
+            const uSet = onSnapshot(referensi.set, snap => {
+              const docLoc = snap.docs.find(d => d.id === 'lokasi_kantor');
+              if (docLoc) setLokasiKantor(docLoc.data());
+            });
+
+            return () => { uLogs(); uReqs(); uReps(); uSet(); };
+          }, [auth.currentUser]);
+
+          // Eksekusi Tulis Data (Write)
+          const tampilkanToast = (pesan) => { setNotifikasi(pesan); setTimeout(() => setNotifikasi(''), 3000); };
+          
+          const simpanKeCloud = async (koleksi, data) => {
+             await addDoc(collection(db, 'artifacts', appId, 'public', 'data', koleksi), { ...data, timestamp: Date.now() });
+          };
+
+          const aksi = {
+             absen: async (data) => { await simpanKeCloud('logs', data); tampilkanToast("Absen berhasil disimpan!"); },
+             pengajuan: async (data) => { await simpanKeCloud('requests', data); tampilkanToast("Pengajuan terkirim ke Admin!"); },
+             laporan: async (data) => { await simpanKeCloud('reports', data); tampilkanToast("Laporan harian tersimpan!"); },
+             updateStatus: async (id, status) => { await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'requests', id), { status }); tampilkanToast("Status diperbarui!"); },
+             updateLokasi: async (koordinat) => { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'lokasi_kantor'), koordinat); tampilkanToast("Lokasi Pusat Diperbarui!"); },
+             resetAbsen: async () => {
+                const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'logs'));
+                snap.forEach(async (d) => await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'logs', d.id)));
+                tampilkanToast("Semua riwayat absen dibersihkan!");
+             }
+          };
+
+          // RENDER LAYAR LOGIN JIKA BELUM MASUK
+          if (!penggunaAktif) {
+            return <LayarLogin setPenggunaAktif={setPenggunaAktif} statusCloud={statusCloud} db={db} appId={appId} auth={auth} />;
+          }
+
+          // RENDER DASHBOARD BERDASARKAN ROLE
+          return (
+            <div className="min-h-screen bg-slate-100 pb-20 md:pb-0">
+              <ToastUI pesan={notifikasi} />
+              {penggunaAktif.role === 'karyawan' ? (
+                <DashboardKaryawan 
+                  user={penggunaAktif} onLogout={() => setPenggunaAktif(null)} 
+                  lokasiKantor={lokasiKantor} batasJarak={BATAS_JARAK_METER}
+                  aksi={aksi} showToast={tampilkanToast}
+                />
+              ) : (
+                <DashboardAdmin 
+                  onLogout={() => setPenggunaAktif(null)} 
+                  data={{ logs, pengajuan, laporan }} 
+                  lokasiKantor={lokasiKantor}
+                  aksi={aksi} exportCSV={exportKeCSV}
+                />
+              )}
+            </div>
+          );
+        }
+
+        // --- 4. KOMPONEN: LAYAR LOGIN & REGISTER ---
+        function LayarLogin({ setPenggunaAktif, statusCloud, db, appId, auth }) {
+          const [modeRegister, setModeRegister] = useState(false);
+          const [form, setForm] = useState({ nama: '', departemen: '', username: '', password: '' });
+          const [pesanError, setPesanError] = useState('');
+          const [pesanSukses, setPesanSukses] = useState('');
+
+          const handleInput = (e) => setForm({ ...form, [e.target.name]: e.target.value });
+
+          const submitForm = async (e) => {
+            e.preventDefault();
+            setPesanError(''); setPesanSukses('');
+            
+            if (!auth.currentUser) return setPesanError('Tunggu koneksi sistem...');
+
+            // CEK ADMIN TERLEBIH DAHULU
+            if (!modeRegister && form.username === 'admin' && form.password === 'Karsa43') {
+              return setPenggunaAktif({ id: 'admin_1', username: 'admin', name: 'Administrator', role: 'admin' });
+            }
+
+            try {
+              const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
+              const dataAkun = await getDocs(usersRef);
+              const listAkun = dataAkun.docs.map(d => ({ dbId: d.id, ...d.data() }));
+
+              if (modeRegister) {
+                if (form.username.toLowerCase() === 'admin') return setPesanError('Username tidak valid!');
+                if (listAkun.some(u => u.username === form.username)) return setPesanError('Username sudah digunakan!');
+                
+                await addDoc(usersRef, { name: form.nama, department: form.departemen, username: form.username, password: form.password, role: 'karyawan', createdAt: Date.now() });
+                setPesanSukses('Akun berhasil dibuat! Silakan masuk.');
+                setModeRegister(false); setForm({ ...form, password: '' });
+              } else {
+                const userKetemu = listAkun.find(u => u.username === form.username && u.password === form.password);
+                if (userKetemu) setPenggunaAktif(userKetemu);
+                else setPesanError('Kredensial tidak cocok!');
+              }
+            } catch (err) { setPesanError('Gangguan server. Coba lagi.'); }
+          };
+
+          return (
+            <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
+              <div className="max-w-md w-full bg-white rounded-3xl shadow-2xl overflow-hidden mb-4 border border-slate-100">
+                <div className="bg-gradient-to-br from-blue-600 to-blue-800 p-8 text-center relative">
+                  <i className={`fas ${modeRegister ? 'fa-user-plus' : 'fa-fingerprint'} text-5xl text-white/90 mb-4 drop-shadow-lg`}></i>
+                  <h1 className="text-2xl font-black text-white tracking-tight">{modeRegister ? 'Buat Akun Baru' : 'Portal Karyawan'}</h1>
+                  <p className="text-blue-200 mt-1 text-sm">Sistem Kehadiran Terpadu</p>
+                </div>
+                
+                <div className="p-8">
+                  {pesanError && <div className="mb-4 bg-rose-50 text-rose-600 p-3 rounded-xl text-sm font-semibold border border-rose-100 flex items-center"><i className="fas fa-exclamation-triangle mr-2"></i>{pesanError}</div>}
+                  {pesanSukses && <div className="mb-4 bg-emerald-50 text-emerald-600 p-3 rounded-xl text-sm font-semibold border border-emerald-100 flex items-center"><i className="fas fa-check mr-2"></i>{pesanSukses}</div>}
+
+                  <form onSubmit={submitForm} className="space-y-4">
+                    {modeRegister && (
+                      <>
+                        <input type="text" name="nama" required placeholder="Nama Lengkap" value={form.nama} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 outline-none focus:border-blue-500 font-medium text-slate-700" />
+                        <input type="text" name="departemen" required placeholder="Divisi / Departemen" value={form.departemen} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 outline-none focus:border-blue-500 font-medium text-slate-700" />
+                      </>
+                    )}
+                    <input type="text" name="username" required placeholder="Username" value={form.username} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 outline-none focus:border-blue-500 font-medium text-slate-700" />
+                    <input type="password" name="password" required placeholder="Password" value={form.password} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 outline-none focus:border-blue-500 font-medium text-slate-700" />
+                    
+                    <button type="submit" disabled={!auth.currentUser} className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl mt-4 shadow-lg shadow-blue-600/30 transition-all active:scale-95 disabled:bg-slate-400">
+                      {modeRegister ? 'DAFTAR SEKARANG' : 'MASUK KE SISTEM'}
+                    </button>
+                  </form>
+                  
+                  <div className="mt-6 text-center">
+                    <button onClick={() => { setModeRegister(!modeRegister); setPesanError(''); setPesanSukses(''); }} className="text-sm font-semibold text-slate-500 hover:text-blue-600 transition-colors">
+                      {modeRegister ? 'Sudah punya akun? Masuk' : 'Karyawan Baru? Buat Akun'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div className={`px-4 py-2 rounded-full text-xs font-bold flex items-center shadow-sm ${statusCloud.includes('Terkoneksi') ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                 <i className={`fas ${statusCloud.includes('Terkoneksi') ? 'fa-check-circle' : 'fa-spinner fa-spin'} mr-2`}></i> Server: {statusCloud}
+              </div>
+            </div>
+          );
+        }
+
+        // --- 5. KOMPONEN: DASHBOARD KARYAWAN ---
+        function DashboardKaryawan({ user, onLogout, lokasiKantor, batasJarak, aksi, showToast }) {
+          const [tab, setTab] = useState('absen');
+
+          return (
+            <div className="max-w-md mx-auto bg-white min-h-screen shadow-2xl relative flex flex-col">
+              {/* Header */}
+              <div className="bg-gradient-to-r from-blue-700 to-blue-600 text-white p-6 rounded-b-[2.5rem] shadow-xl z-10">
+                <div className="flex justify-between items-center mb-6">
+                  <div>
+                    <h2 className="text-xl font-black">{user.name}</h2>
+                    <p className="text-blue-200 text-sm font-medium">{user.department}</p>
+                  </div>
+                  <button onClick={onLogout} className="w-10 h-10 bg-white/10 rounded-full flex items-center justify-center hover:bg-white/20"><i className="fas fa-power-off"></i></button>
+                </div>
+                <div className="bg-white/10 backdrop-blur-sm rounded-2xl p-4 flex items-center justify-between border border-white/20">
+                  <div className="flex items-center"><i className="far fa-clock text-2xl mr-3 opacity-80"></i><span className="font-black text-2xl tracking-wider">{new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}</span></div>
+                  <span className="text-xs bg-white text-blue-800 font-bold px-3 py-1.5 rounded-lg">{new Date().toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+                </div>
+              </div>
+
+              {/* Konten Tab */}
+              <div className="flex-1 p-6 overflow-y-auto z-0">
+                {tab === 'absen' && <FiturAbsensi user={user} lokasiKantor={lokasiKantor} batasJarak={batasJarak} aksiAbsen={aksi.absen} showToast={showToast} />}
+                {tab === 'pengajuan' && <FiturFormulir tipe="pengajuan" user={user} onSubmit={aksi.pengajuan} />}
+                {tab === 'laporan' && <FiturFormulir tipe="laporan" user={user} onSubmit={aksi.laporan} />}
+              </div>
+
+              {/* Navigasi Bawah */}
+              <div className="fixed md:absolute bottom-0 w-full max-w-md bg-white border-t border-slate-100 flex justify-around p-3 pb-6 shadow-[0_-10px_20px_rgba(0,0,0,0.03)] z-20">
+                {[
+                  { id: 'absen', ikon: 'fa-camera-retro', label: 'Absen' },
+                  { id: 'pengajuan', ikon: 'fa-envelope-open-text', label: 'Izin' },
+                  { id: 'laporan', ikon: 'fa-clipboard-list', label: 'Laporan' }
+                ].map(nav => (
+                  <button key={nav.id} onClick={() => setTab(nav.id)} className={`flex flex-col items-center w-20 transition-all ${tab === nav.id ? '-translate-y-2' : ''}`}>
+                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mb-1 transition-all ${tab === nav.id ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30' : 'text-slate-400'}`}>
+                      <i className={`fas ${nav.ikon} text-xl`}></i>
+                    </div>
+                    <span className={`text-[10px] font-bold ${tab === nav.id ? 'text-blue-600' : 'text-slate-400'}`}>{nav.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        }
+
+        // Sub-Fitur: Kamera GPS (Deduplikasi dari versi lama)
+        function FiturAbsensi({ user, lokasiKantor, batasJarak, aksiAbsen, showToast }) {
+          const [statusLokasi, setStatusLokasi] = useState({ jarak: null, pesan: 'Mencari sinyal GPS...' });
+          const [kamera, setKamera] = useState({ aktif: false, jenis: '', fotoB64: null });
+          const refVideo = useRef(null);
+
+          const perbaruiGPS = () => {
+            setStatusLokasi({ jarak: null, pesan: 'Mencari koordinat...' });
+            if (navigator.geolocation) {
+              navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                  const jarakHitung = hitungJarakMeter(pos.coords.latitude, pos.coords.longitude, lokasiKantor.lat, lokasiKantor.lng);
+                  setStatusLokasi({ jarak: jarakHitung, pesan: '' });
+                },
+                (err) => setStatusLokasi({ jarak: null, pesan: 'Akses GPS ditolak/gagal.' }),
+                { enableHighAccuracy: true, timeout: 10000 }
+              );
+            } else setStatusLokasi({ jarak: null, pesan: 'Browser tidak mendukung GPS.' });
+          };
+
+          useEffect(() => { perbaruiGPS(); }, [lokasiKantor]);
+
+          useEffect(() => {
+            let streamObj;
+            if (kamera.aktif && !kamera.fotoB64) {
+              navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+                .then(s => { streamObj = s; if (refVideo.current) refVideo.current.srcObject = s; })
+                .catch(() => { showToast("Kamera diblokir browser!"); setKamera({ ...kamera, aktif: false }); });
+            }
+            return () => { if (streamObj) streamObj.getTracks().forEach(t => t.stop()); };
+          }, [kamera.aktif, kamera.fotoB64]);
+
+          const bukaKamera = (jenisAbsen) => {
+            if (statusLokasi.pesan) return showToast("Sinyal GPS belum ditemukan!");
+            if (statusLokasi.jarak > batasJarak) showToast(`Anda di luar kantor (${statusLokasi.jarak}m). Log akan ditandai!`);
+            setKamera({ aktif: true, jenis: jenisAbsen, fotoB64: null });
+          };
+
+          const jepretFoto = () => {
+            if (!refVideo.current) return;
+            const cvs = document.createElement('canvas');
+            cvs.width = refVideo.current.videoWidth; cvs.height = refVideo.current.videoHeight;
+            cvs.getContext('2d').drawImage(refVideo.current, 0, 0);
+            const base64 = cvs.toDataURL('image/jpeg', 0.5); // Kompresi 50%
+            
+            setKamera({ ...kamera, fotoB64: base64 });
+            aksiAbsen({
+               userName: user.name, type: kamera.jenis, photo: base64,
+               date: new Date().toLocaleDateString('id-ID'), time: new Date().toLocaleTimeString('id-ID'),
+               status: statusLokasi.jarak <= batasJarak ? 'Tepat Lokasi' : 'Luar Jangkauan'
+            });
+            setTimeout(() => setKamera({ aktif: false, jenis: '', fotoB64: null }), 1200);
+          };
+
+          if (kamera.aktif) {
+             return (
+               <div className="fixed inset-0 bg-slate-900 z-50 flex flex-col">
+                  <div className="p-4 flex justify-between items-center text-white bg-slate-900 absolute top-0 w-full z-10 shadow-md">
+                     <span className="font-bold">Mode: {kamera.jenis}</span>
+                     <button onClick={() => setKamera({ ...kamera, aktif: false })} className="w-8 h-8 bg-white/20 rounded-full"><i className="fas fa-times"></i></button>
+                  </div>
+                  <div className="flex-1 relative flex items-center justify-center bg-black mt-14">
+                     {!kamera.fotoB64 ? <video ref={refVideo} autoPlay playsInline className="min-w-full min-h-full object-cover" /> : <img src={kamera.fotoB64} alt="Hasil" className="min-w-full min-h-full object-cover" />}
+                     {!kamera.fotoB64 && <div className="absolute inset-0 border-[50px] border-slate-900/70 rounded-full w-[320px] h-[450px] m-auto pointer-events-none"></div>}
+                  </div>
+                  <div className="h-32 bg-slate-900 flex justify-center items-center pb-6">
+                     {!kamera.fotoB64 ? (
+                        <button onClick={jepretFoto} className="w-20 h-20 bg-white rounded-full border-4 border-slate-500 flex items-center justify-center active:scale-95 transition-transform"><div className="w-16 h-16 border-2 border-slate-900 rounded-full"></div></button>
+                     ) : <div className="text-emerald-400 font-bold flex flex-col items-center"><i className="fas fa-check-circle text-3xl mb-1"></i>Tersimpan</div>}
+                  </div>
+               </div>
+             );
+          }
+
+          const radiusValid = statusLokasi.jarak !== null && statusLokasi.jarak <= batasJarak;
+
+          return (
+             <div className="space-y-6">
+                <div className="bg-white p-5 rounded-3xl border border-slate-100 shadow-sm flex items-center justify-between">
+                   <div className="flex items-center">
+                      <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-2xl mr-4 shadow-inner ${statusLokasi.pesan ? 'bg-slate-100 text-slate-400' : radiusValid ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
+                         <i className="fas fa-map-marked-alt"></i>
+                      </div>
+                      <div>
+                         <h3 className="font-black text-slate-800 text-sm mb-0.5">Sinyal GPS</h3>
+                         {statusLokasi.pesan ? <p className="text-xs text-rose-500 font-bold">{statusLokasi.pesan}</p> : 
+                         <p className="text-xs text-slate-500 font-medium">Jarak: <strong className={radiusValid ? 'text-emerald-600' : 'text-rose-600'}>{statusLokasi.jarak} Meter</strong><br/>
+                         <span className="text-[10px] uppercase font-black">{radiusValid ? '✅ Di Area Kantor' : '❌ Luar Area Kantor'}</span></p>}
+                      </div>
+                   </div>
+                   <button onClick={perbaruiGPS} className="p-3 bg-slate-50 rounded-xl text-blue-500 hover:bg-blue-50"><i className="fas fa-sync-alt"></i></button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                   {[
+                      { j: 'Absen Masuk', i: 'fa-sign-in-alt', c: 'bg-emerald-500 shadow-emerald-200' },
+                      { j: 'Mulai Istirahat', i: 'fa-utensils', c: 'bg-amber-500 shadow-amber-200' },
+                      { j: 'Selesai Istirahat', i: 'fa-briefcase', c: 'bg-blue-500 shadow-blue-200' },
+                      { j: 'Absen Pulang', i: 'fa-sign-out-alt', c: 'bg-rose-500 shadow-rose-200' }
+                   ].map(btn => (
+                      <button key={btn.j} onClick={() => bukaKamera(btn.j)} className={`${btn.c} text-white p-5 rounded-3xl shadow-lg flex flex-col items-center justify-center transition-transform active:scale-95 group`}>
+                         <i className={`fas ${btn.i} text-3xl mb-2 group-hover:scale-110 transition-transform`}></i>
+                         <span className="font-bold text-xs uppercase tracking-wide">{btn.j}</span>
+                      </button>
+                   ))}
+                </div>
+             </div>
+          );
+        }
+
+        // Sub-Fitur: Formulir Gabungan (Pengajuan & Laporan)
+        function FiturFormulir({ tipe, user, onSubmit }) {
+           const [form, setForm] = useState({ jenis: 'Cuti', tanggal: '', alasan: '', konten: '' });
+           
+           const kirim = (e) => {
+              e.preventDefault();
+              if (tipe === 'pengajuan') onSubmit({ userName: user.name, type: form.jenis, reason: form.alasan, date: form.tanggal, status: 'Menunggu' });
+              else onSubmit({ userName: user.name, date: new Date().toLocaleDateString('id-ID'), time: new Date().toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit' }), content: form.konten });
+              setForm({ jenis: 'Cuti', tanggal: '', alasan: '', konten: '' }); // Reset
+           };
+
+           return (
+              <div className="space-y-4">
+                 <h2 className="font-black text-slate-800 text-lg border-b-2 border-slate-100 pb-2">
+                    {tipe === 'pengajuan' ? 'Form Izin & Cuti' : 'Laporan Pekerjaan'}
+                 </h2>
+                 <form onSubmit={kirim} className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm space-y-4">
+                    {tipe === 'pengajuan' ? (
+                       <>
+                          <div>
+                             <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">Pilih Jenis</label>
+                             <select value={form.jenis} onChange={(e)=>setForm({...form, jenis: e.target.value})} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 font-bold text-slate-700 outline-none focus:border-blue-500">
+                                <option>Cuti</option><option>Izin</option><option>Sakit</option>
+                             </select>
+                          </div>
+                          <div>
+                             <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">Tanggal</label>
+                             <input type="date" required value={form.tanggal} onChange={(e)=>setForm({...form, tanggal: e.target.value})} className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 font-bold text-slate-700 outline-none focus:border-blue-500" />
+                          </div>
+                          <div>
+                             <label className="block text-[10px] font-black text-slate-400 uppercase mb-1">Detail Alasan</label>
+                             <textarea required value={form.alasan} onChange={(e)=>setForm({...form, alasan: e.target.value})} rows="3" className="w-full border-2 border-slate-100 rounded-xl p-3 bg-slate-50 font-medium text-slate-700 outline-none focus:border-blue-500"></textarea>
+                          </div>
+                       </>
+                    ) : (
+                       <div>
+                          <label className="block text-[10px] font-black text-slate-400 uppercase mb-2">Tuliskan Aktivitas Hari Ini</label>
+                          <textarea required value={form.konten} onChange={(e)=>setForm({...form, konten: e.target.value})} rows="8" placeholder="1. Meeting klien...&#10;2. Mengerjakan tugas..." className="w-full border-2 border-slate-100 rounded-xl p-4 bg-slate-50 font-medium text-slate-700 outline-none focus:border-blue-500 leading-relaxed"></textarea>
+                       </div>
+                    )}
+                    <button type="submit" className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95">
+                       <i className="fas fa-paper-plane mr-2"></i> KIRIM SEKARANG
+                    </button>
+                 </form>
+              </div>
+           );
+        }
+
+        // --- 6. KOMPONEN: DASHBOARD ADMIN ---
+        function DashboardAdmin({ onLogout, data, lokasiKantor, aksi, exportCSV }) {
+          const [tabAktif, setTabAktif] = useState('pantau');
+          const [modalLokasi, setModalLokasi] = useState(false);
+          const [formLokasi, setFormLokasi] = useState(lokasiKantor);
+
+          const MenuSidebar = [
+             { id: 'pantau', ikon: 'fa-tv', judul: 'Monitor Live' },
+             { id: 'izin', ikon: 'fa-clipboard-check', judul: 'Approval Izin' },
+             { id: 'tugas', ikon: 'fa-tasks', judul: 'Arsip Laporan' }
+          ];
+
+          return (
+             <div className="flex h-screen bg-slate-50 font-sans">
+                {/* Panel Kiri Desktop */}
+                <div className="w-64 bg-slate-900 text-white hidden md:flex flex-col shadow-2xl z-20">
+                   <div className="p-6 border-b border-slate-800 flex items-center">
+                      <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center mr-3 shadow-lg shadow-blue-500/50"><i className="fas fa-fingerprint text-xl"></i></div>
+                      <div><h1 className="font-black text-lg">AdminHub</h1><p className="text-[9px] font-bold text-blue-400 uppercase tracking-widest">Sistem Pusat</p></div>
+                   </div>
+                   <div className="flex-1 py-6 px-4 space-y-2">
+                      {MenuSidebar.map(menu => (
+                         <button key={menu.id} onClick={()=>setTabAktif(menu.id)} className={`w-full flex items-center px-4 py-3 rounded-xl text-sm font-bold transition-all ${tabAktif === menu.id ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
+                            <i className={`fas ${menu.ikon} w-6 text-left text-lg`}></i> {menu.judul}
+                         </button>
+                      ))}
+                      <div className="pt-6">
+                         <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-4 mb-2">Konfigurasi</p>
+                         <button onClick={()=>setModalLokasi(true)} className="w-full flex items-center px-4 py-2.5 rounded-xl text-sm font-bold text-slate-400 hover:bg-slate-800 hover:text-white transition-all"><i className="fas fa-map-marker-alt w-6 text-left"></i> Kordinat Kantor</button>
+                         <button onClick={()=>{ if(window.confirm('Yakin hapus SEMUA riwayat absen?')) aksi.resetAbsen(); }} className="w-full flex items-center px-4 py-2.5 rounded-xl text-sm font-bold text-rose-400 hover:bg-rose-500/10 transition-all mt-1"><i className="fas fa-trash-alt w-6 text-left"></i> Kosongkan Log</button>
+                      </div>
+                   </div>
+                   <div className="p-4"><button onClick={onLogout} className="w-full py-3 bg-slate-800 text-slate-300 font-bold rounded-xl hover:bg-rose-600 hover:text-white transition-all">KELUAR</button></div>
+                </div>
+
+                {/* Panel Utama */}
+                <div className="flex-1 flex flex-col overflow-hidden relative">
+                   {/* Navigasi Mobile */}
+                   <div className="md:hidden bg-slate-900 text-white p-4 flex justify-between items-center shadow-lg z-20">
+                      <h1 className="font-black"><i className="fas fa-fingerprint text-blue-400 mr-2"></i>AdminHub</h1>
+                      <button onClick={onLogout} className="text-rose-400"><i className="fas fa-power-off"></i></button>
+                   </div>
+                   <div className="md:hidden bg-white border-b border-slate-200 p-3 flex gap-2 overflow-x-auto shadow-sm z-10">
+                      {MenuSidebar.map(m => <button key={m.id} onClick={()=>setTabAktif(m.id)} className={`whitespace-nowrap px-4 py-2 rounded-full text-xs font-bold ${tabAktif === m.id ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500'}`}>{m.judul}</button>)}
+                      <button onClick={()=>setModalLokasi(true)} className="bg-slate-100 text-slate-500 px-4 py-2 rounded-full text-xs font-bold"><i className="fas fa-cog"></i></button>
+                   </div>
+
+                   <main className="flex-1 overflow-y-auto p-4 md:p-8 relative">
+                      <div className="flex justify-between items-end mb-6">
+                         <div>
+                            <h2 className="text-2xl font-black text-slate-800">{MenuSidebar.find(i=>i.id===tabAktif)?.judul || 'Pengaturan'}</h2>
+                            <p className="text-xs font-bold text-slate-400 mt-1 uppercase tracking-wider flex items-center"><i className="fas fa-circle text-[8px] text-emerald-500 mr-2 animate-pulse"></i>Real-time Data</p>
+                         </div>
+                         {tabAktif === 'pantau' && <button onClick={()=>exportCSV(data.logs, 'Rekap_Absen.csv')} className="bg-emerald-600 text-white px-4 py-2.5 rounded-xl font-bold text-xs shadow-md hover:bg-emerald-700 flex items-center"><i className="fas fa-file-excel mr-2 text-lg"></i> Unduh CSV</button>}
+                      </div>
+
+                      {/* Tampilan Tabel Monitor */}
+                      {tabAktif === 'pantau' && (
+                         <div className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
+                            <div className="overflow-x-auto">
+                               <table className="w-full text-left border-collapse whitespace-nowrap">
+                                  <thead>
+                                     <tr className="bg-slate-50 text-slate-500 border-b border-slate-100 text-[10px] uppercase font-black tracking-widest">
+                                        <th className="p-5">Profil Karyawan</th><th className="p-5">Waktu</th><th className="p-5">Kategori</th><th className="p-5">Sistem Validasi</th><th className="p-5 text-right">Foto Bukti</th>
+                                     </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-50">
+                                     {data.logs.length === 0 ? <tr><td colSpan="5" className="p-10 text-center text-slate-400 font-bold">Data kosong.</td></tr> : 
+                                     data.logs.map(lg => (
+                                        <tr key={lg.dbId} className="hover:bg-slate-50/50">
+                                           <td className="p-5 font-black text-slate-800 text-sm">{lg.userName}</td>
+                                           <td className="p-5 text-xs font-bold text-slate-500">{lg.date} - {lg.time}</td>
+                                           <td className="p-5"><span className="px-3 py-1 bg-slate-100 text-slate-600 rounded-lg text-[10px] font-black uppercase tracking-wider">{lg.type}</span></td>
+                                           <td className="p-5"><span className={`text-xs font-black flex items-center ${lg.status==='Tepat Lokasi'?'text-emerald-500':'text-rose-500'}`}><i className={`fas ${lg.status==='Tepat Lokasi'?'fa-check-circle':'fa-times-circle'} mr-1.5`}></i>{lg.status==='Tepat Lokasi'?'VALID (GPS)':'DITOLAK (Luar Radius)'}</span></td>
+                                           <td className="p-5 flex justify-end"><img src={lg.photo} alt="Bukti" className="w-12 h-12 rounded-xl object-cover border-2 border-slate-100 shadow-sm hover:scale-150 transition-transform origin-right cursor-zoom-in" /></td>
+                                        </tr>
+                                     ))}
+                                  </tbody>
+                               </table>
+                            </div>
+                         </div>
+                      )}
+
+                      {/* Tampilan Kartu Izin */}
+                      {tabAktif === 'izin' && (
+                         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                            {data.pengajuan.length === 0 ? <div className="col-span-full text-center p-10 text-slate-400 font-bold">Belum ada permohonan.</div> : 
+                            data.pengajuan.map(req => (
+                               <div key={req.dbId} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                                  <div>
+                                     <div className="flex justify-between items-center mb-4">
+                                        <div className="font-black text-slate-800 text-lg">{req.userName}</div>
+                                        <span className={`px-3 py-1 text-[10px] font-black uppercase tracking-wider rounded-lg ${req.status==='Menunggu'?'bg-amber-100 text-amber-700':req.status==='Disetujui'?'bg-emerald-100 text-emerald-700':'bg-rose-100 text-rose-700'}`}>{req.status}</span>
+                                     </div>
+                                     <div className="bg-slate-50 p-4 rounded-2xl mb-5">
+                                        <div className="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-1"><i className="fas fa-tag mr-1"></i> {req.type} &bull; {req.date}</div>
+                                        <p className="text-sm font-medium text-slate-600 mt-2 leading-relaxed">"{req.reason}"</p>
+                                     </div>
+                                  </div>
+                                  {req.status === 'Menunggu' && (
+                                     <div className="flex gap-3">
+                                        <button onClick={()=>aksi.updateStatus(req.dbId, 'Ditolak')} className="flex-1 py-3 border-2 border-slate-100 rounded-xl text-xs font-black text-slate-500 hover:border-rose-200 hover:text-rose-600 transition-colors">TOLAK</button>
+                                        <button onClick={()=>aksi.updateStatus(req.dbId, 'Disetujui')} className="flex-1 py-3 bg-slate-900 rounded-xl text-xs font-black text-white hover:bg-blue-600 shadow-lg transition-colors">SETUJUI</button>
+                                     </div>
+                                  )}
+                               </div>
+                            ))}
+                         </div>
+                      )}
+
+                      {/* Tampilan Laporan */}
+                      {tabAktif === 'tugas' && (
+                         <div className="columns-1 md:columns-2 lg:columns-3 gap-5 space-y-5">
+                            {data.laporan.length === 0 ? <div className="p-10 text-center text-slate-400 font-bold">Arsip kosong.</div> : 
+                            data.laporan.map(rep => (
+                               <div key={rep.dbId} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm break-inside-avoid">
+                                  <div className="flex justify-between items-center mb-4 border-b border-slate-100 pb-3">
+                                     <span className="font-black text-slate-800">{rep.userName}</span>
+                                     <span className="text-[10px] font-bold text-slate-400 bg-slate-50 px-2 py-1 rounded-lg"><i className="fas fa-clock mr-1"></i> {rep.date}</span>
+                                  </div>
+                                  <p className="text-sm font-medium text-slate-600 whitespace-pre-line leading-relaxed">{rep.content}</p>
+                               </div>
+                            ))}
+                         </div>
+                      )}
+                   </main>
+
+                   {/* Komponen Modal Kordinat */}
+                   {modalLokasi && (
+                      <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                         <div className="bg-white w-full max-w-sm rounded-[2rem] overflow-hidden shadow-2xl scale-100 animate-in zoom-in-95">
+                            <div className="bg-slate-900 p-6 flex justify-between items-center text-white">
+                               <h3 className="font-black"><i className="fas fa-map-marker-alt text-blue-400 mr-2"></i> Pengaturan Pusat GPS</h3>
+                               <button onClick={()=>setModalLokasi(false)} className="opacity-50 hover:opacity-100"><i className="fas fa-times text-xl"></i></button>
+                            </div>
+                            <div className="p-8">
+                               <div className="space-y-5">
+                                  <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Garis Lintang (Latitude)</label><input type="number" step="any" value={formLokasi.lat} onChange={(e)=>setFormLokasi({...formLokasi, lat: parseFloat(e.target.value)})} className="w-full border-2 border-slate-100 rounded-xl bg-slate-50 p-4 outline-none focus:border-blue-500 font-bold text-slate-700" /></div>
+                                  <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Garis Bujur (Longitude)</label><input type="number" step="any" value={formLokasi.lng} onChange={(e)=>setFormLokasi({...formLokasi, lng: parseFloat(e.target.value)})} className="w-full border-2 border-slate-100 rounded-xl bg-slate-50 p-4 outline-none focus:border-blue-500 font-bold text-slate-700" /></div>
+                               </div>
+                               <button onClick={()=>{ aksi.updateLokasi(formLokasi); setModalLokasi(false); }} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-4 rounded-xl shadow-lg mt-8 transition-all">PERBARUI TITIK LOKASI</button>
+                            </div>
+                         </div>
+                      </div>
+                   )}
+                </div>
+             </div>
+          );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<AplikasiAbsensi />);
+    </script>
+</body>
+</html>
