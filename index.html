@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Aplikasi Absensi Digital Berbasis Lokasi dan Foto">
     
-    <!-- TAG ANTI-CACHE (Penting untuk mengatasi masalah GitHub Pages) -->
+    <!-- TAG ANTI-CACHE -->
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
 
-    <title>Aplikasi Absensi Cloud</title>
+    <title>Aplikasi Absensi Terpadu</title>
     
     <!-- Pustaka Eksternal -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -18,36 +18,20 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-    <!-- Modul Firebase -->
-    <script type="importmap">
-      {
-        "imports": {
-          "firebase/app": "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js",
-          "firebase/auth": "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js",
-          "firebase/firestore": "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"
-        }
-      }
-    </script>
 </head>
 <body class="bg-slate-100 antialiased font-sans">
     <div id="root"></div>
 
-    <script type="text/babel" data-type="module">
-        import { initializeApp } from 'firebase/app';
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-        import { getFirestore, collection, onSnapshot, addDoc, updateDoc, doc, setDoc, deleteDoc, getDocs } from 'firebase/firestore';
-
+    <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // --- 1. INISIALISASI DATABASE ---
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'sistem-absensi-final';
+        // --- 1. FUNGSI UTILITAS ---
+        // Penanganan Local Storage yang Aman
+        const getStorage = (key, defaultVal) => {
+            try { const item = localStorage.getItem(key); return item ? JSON.parse(item) : defaultVal; } 
+            catch(e) { return defaultVal; }
+        };
 
-        // --- 2. FUNGSI UTILITAS (Deduplikasi) ---
         // Menghitung Jarak GPS (Meter)
         function hitungJarakMeter(lat1, lon1, lat2, lon2) {
           const R = 6371000; 
@@ -58,10 +42,10 @@
           return Math.round(R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)))); 
         }
 
-        // Export Data ke CSV
+        // Export Data ke CSV (Untuk Google Sheets / Excel)
         function exportKeCSV(data, namaFile) {
             if (!data || data.length === 0) return alert("Tidak ada data untuk diekspor!");
-            const dataBersih = data.map(({ dbId, photo, ...sisa }) => sisa); // Buang foto agar CSV tidak error
+            const dataBersih = data.map(({ id, photo, ...sisa }) => sisa); // Buang kode base64 foto agar Excel tidak error
             const header = Object.keys(dataBersih[0]).join(',');
             const baris = dataBersih.map(obj => Object.values(obj).map(val => `"${val}"`).join(',')).join('\n');
             const blob = new Blob([header + '\n' + baris], { type: 'text/csv;charset=utf-8;' });
@@ -69,7 +53,7 @@
             link.href = URL.createObjectURL(blob); link.download = namaFile; link.click();
         }
 
-        // Komponen Toast Global (Notifikasi)
+        // Komponen Toast Global (Notifikasi Mengambang)
         const ToastUI = ({ pesan }) => {
             if (!pesan) return null;
             return (
@@ -79,84 +63,42 @@
             );
         };
 
-        // --- 3. KOMPONEN UTAMA (Aplikasi Root) ---
+        // --- 2. KOMPONEN UTAMA (Aplikasi Root) ---
         function AplikasiAbsensi() {
           const [penggunaAktif, setPenggunaAktif] = useState(null); 
-          const [statusCloud, setStatusCloud] = useState('Menghubungkan ke server...');
           const [notifikasi, setNotifikasi] = useState('');
 
-          // State Data Cloud
-          const [logs, setLogs] = useState([]);
-          const [pengajuan, setPengajuan] = useState([]);
-          const [laporan, setLaporan] = useState([]);
-          const [lokasiKantor, setLokasiKantor] = useState({ lat: -6.200000, lng: 106.816666 });
-          const BATAS_JARAK_METER = 100; // Radius absen valid
+          // State Database Lokal
+          const [akunStorage, setAkunStorage] = useState(() => getStorage('absen_akun', [{ id: 'admin_1', username: 'admin', password: 'Karsa43', name: 'Administrator', role: 'admin' }]));
+          const [logs, setLogs] = useState(() => getStorage('absen_logs', []));
+          const [pengajuan, setPengajuan] = useState(() => getStorage('absen_reqs', []));
+          const [laporan, setLaporan] = useState(() => getStorage('absen_reps', []));
+          const [lokasiKantor, setLokasiKantor] = useState(() => getStorage('absen_loc', { lat: -6.200000, lng: 106.816666 }));
+          const BATAS_JARAK_METER = 100;
 
-          // Hubungkan ke Firebase Auth (Wajib sebelum akses database)
-          useEffect(() => {
-            const jalankanAuth = async () => {
-              try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                  await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                  await signInAnonymously(auth);
-                }
-              } catch (err) { console.error("Auth gagal:", err); setStatusCloud('Koneksi Gagal'); }
-            };
-            jalankanAuth();
-            
-            const unsub = onAuthStateChanged(auth, (user) => {
-               if(user) setStatusCloud('Terkoneksi (Aman)');
-            });
-            return () => unsub();
-          }, []);
+          // Auto-Save ke Browser Memory setiap ada perubahan
+          useEffect(() => { localStorage.setItem('absen_akun', JSON.stringify(akunStorage)); }, [akunStorage]);
+          useEffect(() => { localStorage.setItem('absen_logs', JSON.stringify(logs)); }, [logs]);
+          useEffect(() => { localStorage.setItem('absen_reqs', JSON.stringify(pengajuan)); }, [pengajuan]);
+          useEffect(() => { localStorage.setItem('absen_reps', JSON.stringify(laporan)); }, [laporan]);
+          useEffect(() => { localStorage.setItem('absen_loc', JSON.stringify(lokasiKantor)); }, [lokasiKantor]);
 
-          // Tarik Data Realtime (Read)
-          useEffect(() => {
-            if (!auth.currentUser) return;
-            const referensi = {
-              logs: collection(db, 'artifacts', appId, 'public', 'data', 'logs'),
-              reqs: collection(db, 'artifacts', appId, 'public', 'data', 'requests'),
-              reps: collection(db, 'artifacts', appId, 'public', 'data', 'reports'),
-              set: collection(db, 'artifacts', appId, 'public', 'data', 'settings')
-            };
-
-            const urutBaru = (a, b) => b.timestamp - a.timestamp;
-            
-            const uLogs = onSnapshot(referensi.logs, snap => setLogs(snap.docs.map(d => ({ dbId: d.id, ...d.data() })).sort(urutBaru)));
-            const uReqs = onSnapshot(referensi.reqs, snap => setPengajuan(snap.docs.map(d => ({ dbId: d.id, ...d.data() })).sort(urutBaru)));
-            const uReps = onSnapshot(referensi.reps, snap => setLaporan(snap.docs.map(d => ({ dbId: d.id, ...d.data() })).sort(urutBaru)));
-            const uSet = onSnapshot(referensi.set, snap => {
-              const docLoc = snap.docs.find(d => d.id === 'lokasi_kantor');
-              if (docLoc) setLokasiKantor(docLoc.data());
-            });
-
-            return () => { uLogs(); uReqs(); uReps(); uSet(); };
-          }, [auth.currentUser]);
-
-          // Eksekusi Tulis Data (Write)
+          // Eksekusi Tulis Data
           const tampilkanToast = (pesan) => { setNotifikasi(pesan); setTimeout(() => setNotifikasi(''), 3000); };
           
-          const simpanKeCloud = async (koleksi, data) => {
-             await addDoc(collection(db, 'artifacts', appId, 'public', 'data', koleksi), { ...data, timestamp: Date.now() });
-          };
-
           const aksi = {
-             absen: async (data) => { await simpanKeCloud('logs', data); tampilkanToast("Absen berhasil disimpan!"); },
-             pengajuan: async (data) => { await simpanKeCloud('requests', data); tampilkanToast("Pengajuan terkirim ke Admin!"); },
-             laporan: async (data) => { await simpanKeCloud('reports', data); tampilkanToast("Laporan harian tersimpan!"); },
-             updateStatus: async (id, status) => { await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'requests', id), { status }); tampilkanToast("Status diperbarui!"); },
-             updateLokasi: async (koordinat) => { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'lokasi_kantor'), koordinat); tampilkanToast("Lokasi Pusat Diperbarui!"); },
-             resetAbsen: async () => {
-                const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'logs'));
-                snap.forEach(async (d) => await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'logs', d.id)));
-                tampilkanToast("Semua riwayat absen dibersihkan!");
-             }
+             daftarAkun: (data) => { setAkunStorage([...akunStorage, { ...data, id: Date.now() }]); },
+             absen: (data) => { setLogs([{ ...data, id: Date.now() }, ...logs]); tampilkanToast("Absen berhasil disimpan!"); },
+             pengajuan: (data) => { setPengajuan([{ ...data, id: Date.now() }, ...pengajuan]); tampilkanToast("Pengajuan terkirim ke Admin!"); },
+             laporan: (data) => { setLaporan([{ ...data, id: Date.now() }, ...laporan]); tampilkanToast("Laporan harian tersimpan!"); },
+             updateStatus: (id, status) => { setPengajuan(pengajuan.map(p => p.id === id ? { ...p, status } : p)); tampilkanToast("Status diperbarui!"); },
+             updateLokasi: (koordinat) => { setLokasiKantor(koordinat); tampilkanToast("Lokasi Pusat Diperbarui!"); },
+             resetAbsen: () => { setLogs([]); tampilkanToast("Semua riwayat absen dibersihkan!"); }
           };
 
           // RENDER LAYAR LOGIN JIKA BELUM MASUK
           if (!penggunaAktif) {
-            return <LayarLogin setPenggunaAktif={setPenggunaAktif} statusCloud={statusCloud} db={db} appId={appId} auth={auth} />;
+            return <LayarLogin setPenggunaAktif={setPenggunaAktif} dataAkun={akunStorage} aksiDaftar={aksi.daftarAkun} />;
           }
 
           // RENDER DASHBOARD BERDASARKAN ROLE
@@ -181,8 +123,8 @@
           );
         }
 
-        // --- 4. KOMPONEN: LAYAR LOGIN & REGISTER ---
-        function LayarLogin({ setPenggunaAktif, statusCloud, db, appId, auth }) {
+        // --- 3. KOMPONEN: LAYAR LOGIN & REGISTER ---
+        function LayarLogin({ setPenggunaAktif, dataAkun, aksiDaftar }) {
           const [modeRegister, setModeRegister] = useState(false);
           const [form, setForm] = useState({ nama: '', departemen: '', username: '', password: '' });
           const [pesanError, setPesanError] = useState('');
@@ -190,35 +132,22 @@
 
           const handleInput = (e) => setForm({ ...form, [e.target.name]: e.target.value });
 
-          const submitForm = async (e) => {
+          const submitForm = (e) => {
             e.preventDefault();
             setPesanError(''); setPesanSukses('');
-            
-            if (!auth.currentUser) return setPesanError('Tunggu koneksi sistem...');
 
-            // CEK ADMIN TERLEBIH DAHULU
-            if (!modeRegister && form.username === 'admin' && form.password === 'Karsa43') {
-              return setPenggunaAktif({ id: 'admin_1', username: 'admin', name: 'Administrator', role: 'admin' });
-            }
-
-            try {
-              const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
-              const dataAkun = await getDocs(usersRef);
-              const listAkun = dataAkun.docs.map(d => ({ dbId: d.id, ...d.data() }));
-
-              if (modeRegister) {
+            if (modeRegister) {
                 if (form.username.toLowerCase() === 'admin') return setPesanError('Username tidak valid!');
-                if (listAkun.some(u => u.username === form.username)) return setPesanError('Username sudah digunakan!');
+                if (dataAkun.some(u => u.username === form.username)) return setPesanError('Username sudah digunakan!');
                 
-                await addDoc(usersRef, { name: form.nama, department: form.departemen, username: form.username, password: form.password, role: 'karyawan', createdAt: Date.now() });
+                aksiDaftar({ name: form.nama, department: form.departemen, username: form.username, password: form.password, role: 'karyawan', createdAt: new Date().toLocaleDateString('id-ID') });
                 setPesanSukses('Akun berhasil dibuat! Silakan masuk.');
                 setModeRegister(false); setForm({ ...form, password: '' });
-              } else {
-                const userKetemu = listAkun.find(u => u.username === form.username && u.password === form.password);
+            } else {
+                const userKetemu = dataAkun.find(u => u.username === form.username && u.password === form.password);
                 if (userKetemu) setPenggunaAktif(userKetemu);
-                else setPesanError('Kredensial tidak cocok!');
-              }
-            } catch (err) { setPesanError('Gangguan server. Coba lagi.'); }
+                else setPesanError('Username atau Password salah!');
+            }
           };
 
           return (
@@ -244,7 +173,7 @@
                     <input type="text" name="username" required placeholder="Username" value={form.username} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 outline-none focus:border-blue-500 font-medium text-slate-700" />
                     <input type="password" name="password" required placeholder="Password" value={form.password} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 outline-none focus:border-blue-500 font-medium text-slate-700" />
                     
-                    <button type="submit" disabled={!auth.currentUser} className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl mt-4 shadow-lg shadow-blue-600/30 transition-all active:scale-95 disabled:bg-slate-400">
+                    <button type="submit" className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl mt-4 shadow-lg shadow-blue-600/30 transition-all active:scale-95">
                       {modeRegister ? 'DAFTAR SEKARANG' : 'MASUK KE SISTEM'}
                     </button>
                   </form>
@@ -256,14 +185,14 @@
                   </div>
                 </div>
               </div>
-              <div className={`px-4 py-2 rounded-full text-xs font-bold flex items-center shadow-sm ${statusCloud.includes('Terkoneksi') ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                 <i className={`fas ${statusCloud.includes('Terkoneksi') ? 'fa-check-circle' : 'fa-spinner fa-spin'} mr-2`}></i> Server: {statusCloud}
+              <div className="px-4 py-2 rounded-full text-xs font-bold flex items-center shadow-sm bg-emerald-100 text-emerald-700">
+                 <i className="fas fa-check-circle mr-2"></i> Sistem Siap Digunakan
               </div>
             </div>
           );
         }
 
-        // --- 5. KOMPONEN: DASHBOARD KARYAWAN ---
+        // --- 4. KOMPONEN: DASHBOARD KARYAWAN ---
         function DashboardKaryawan({ user, onLogout, lokasiKantor, batasJarak, aksi, showToast }) {
           const [tab, setTab] = useState('absen');
 
@@ -310,7 +239,7 @@
           );
         }
 
-        // Sub-Fitur: Kamera GPS (Deduplikasi dari versi lama)
+        // --- SUB-KOMPONEN KARYAWAN ---
         function FiturAbsensi({ user, lokasiKantor, batasJarak, aksiAbsen, showToast }) {
           const [statusLokasi, setStatusLokasi] = useState({ jarak: null, pesan: 'Mencari sinyal GPS...' });
           const [kamera, setKamera] = useState({ aktif: false, jenis: '', fotoB64: null });
@@ -337,7 +266,7 @@
             if (kamera.aktif && !kamera.fotoB64) {
               navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
                 .then(s => { streamObj = s; if (refVideo.current) refVideo.current.srcObject = s; })
-                .catch(() => { showToast("Kamera diblokir browser!"); setKamera({ ...kamera, aktif: false }); });
+                .catch(() => { showToast("Kamera diblokir browser! Izinkan akses kamera."); setKamera({ ...kamera, aktif: false }); });
             }
             return () => { if (streamObj) streamObj.getTracks().forEach(t => t.stop()); };
           }, [kamera.aktif, kamera.fotoB64]);
@@ -353,7 +282,7 @@
             const cvs = document.createElement('canvas');
             cvs.width = refVideo.current.videoWidth; cvs.height = refVideo.current.videoHeight;
             cvs.getContext('2d').drawImage(refVideo.current, 0, 0);
-            const base64 = cvs.toDataURL('image/jpeg', 0.5); // Kompresi 50%
+            const base64 = cvs.toDataURL('image/jpeg', 0.5); // Kompresi agar browser tidak berat
             
             setKamera({ ...kamera, fotoB64: base64 });
             aksiAbsen({
@@ -420,7 +349,6 @@
           );
         }
 
-        // Sub-Fitur: Formulir Gabungan (Pengajuan & Laporan)
         function FiturFormulir({ tipe, user, onSubmit }) {
            const [form, setForm] = useState({ jenis: 'Cuti', tanggal: '', alasan: '', konten: '' });
            
@@ -428,7 +356,7 @@
               e.preventDefault();
               if (tipe === 'pengajuan') onSubmit({ userName: user.name, type: form.jenis, reason: form.alasan, date: form.tanggal, status: 'Menunggu' });
               else onSubmit({ userName: user.name, date: new Date().toLocaleDateString('id-ID'), time: new Date().toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit' }), content: form.konten });
-              setForm({ jenis: 'Cuti', tanggal: '', alasan: '', konten: '' }); // Reset
+              setForm({ jenis: 'Cuti', tanggal: '', alasan: '', konten: '' });
            };
 
            return (
@@ -468,7 +396,7 @@
            );
         }
 
-        // --- 6. KOMPONEN: DASHBOARD ADMIN ---
+        // --- 5. KOMPONEN: DASHBOARD ADMIN ---
         function DashboardAdmin({ onLogout, data, lokasiKantor, aksi, exportCSV }) {
           const [tabAktif, setTabAktif] = useState('pantau');
           const [modalLokasi, setModalLokasi] = useState(false);
@@ -486,7 +414,7 @@
                 <div className="w-64 bg-slate-900 text-white hidden md:flex flex-col shadow-2xl z-20">
                    <div className="p-6 border-b border-slate-800 flex items-center">
                       <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center mr-3 shadow-lg shadow-blue-500/50"><i className="fas fa-fingerprint text-xl"></i></div>
-                      <div><h1 className="font-black text-lg">AdminHub</h1><p className="text-[9px] font-bold text-blue-400 uppercase tracking-widest">Sistem Pusat</p></div>
+                      <div><h1 className="font-black text-lg">AdminHub</h1><p className="text-[9px] font-bold text-emerald-400 uppercase tracking-widest">Sistem Aktif</p></div>
                    </div>
                    <div className="flex-1 py-6 px-4 space-y-2">
                       {MenuSidebar.map(menu => (
@@ -519,7 +447,7 @@
                       <div className="flex justify-between items-end mb-6">
                          <div>
                             <h2 className="text-2xl font-black text-slate-800">{MenuSidebar.find(i=>i.id===tabAktif)?.judul || 'Pengaturan'}</h2>
-                            <p className="text-xs font-bold text-slate-400 mt-1 uppercase tracking-wider flex items-center"><i className="fas fa-circle text-[8px] text-emerald-500 mr-2 animate-pulse"></i>Real-time Data</p>
+                            <p className="text-xs font-bold text-slate-400 mt-1 uppercase tracking-wider flex items-center"><i className="fas fa-hdd text-emerald-500 mr-2"></i>Data Tersimpan Lokal</p>
                          </div>
                          {tabAktif === 'pantau' && <button onClick={()=>exportCSV(data.logs, 'Rekap_Absen.csv')} className="bg-emerald-600 text-white px-4 py-2.5 rounded-xl font-bold text-xs shadow-md hover:bg-emerald-700 flex items-center"><i className="fas fa-file-excel mr-2 text-lg"></i> Unduh CSV</button>}
                       </div>
@@ -537,7 +465,7 @@
                                   <tbody className="divide-y divide-slate-50">
                                      {data.logs.length === 0 ? <tr><td colSpan="5" className="p-10 text-center text-slate-400 font-bold">Data kosong.</td></tr> : 
                                      data.logs.map(lg => (
-                                        <tr key={lg.dbId} className="hover:bg-slate-50/50">
+                                        <tr key={lg.id} className="hover:bg-slate-50/50">
                                            <td className="p-5 font-black text-slate-800 text-sm">{lg.userName}</td>
                                            <td className="p-5 text-xs font-bold text-slate-500">{lg.date} - {lg.time}</td>
                                            <td className="p-5"><span className="px-3 py-1 bg-slate-100 text-slate-600 rounded-lg text-[10px] font-black uppercase tracking-wider">{lg.type}</span></td>
@@ -556,7 +484,7 @@
                          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                             {data.pengajuan.length === 0 ? <div className="col-span-full text-center p-10 text-slate-400 font-bold">Belum ada permohonan.</div> : 
                             data.pengajuan.map(req => (
-                               <div key={req.dbId} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between">
+                               <div key={req.id} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-between">
                                   <div>
                                      <div className="flex justify-between items-center mb-4">
                                         <div className="font-black text-slate-800 text-lg">{req.userName}</div>
@@ -569,8 +497,8 @@
                                   </div>
                                   {req.status === 'Menunggu' && (
                                      <div className="flex gap-3">
-                                        <button onClick={()=>aksi.updateStatus(req.dbId, 'Ditolak')} className="flex-1 py-3 border-2 border-slate-100 rounded-xl text-xs font-black text-slate-500 hover:border-rose-200 hover:text-rose-600 transition-colors">TOLAK</button>
-                                        <button onClick={()=>aksi.updateStatus(req.dbId, 'Disetujui')} className="flex-1 py-3 bg-slate-900 rounded-xl text-xs font-black text-white hover:bg-blue-600 shadow-lg transition-colors">SETUJUI</button>
+                                        <button onClick={()=>aksi.updateStatus(req.id, 'Ditolak')} className="flex-1 py-3 border-2 border-slate-100 rounded-xl text-xs font-black text-slate-500 hover:border-rose-200 hover:text-rose-600 transition-colors">TOLAK</button>
+                                        <button onClick={()=>aksi.updateStatus(req.id, 'Disetujui')} className="flex-1 py-3 bg-slate-900 rounded-xl text-xs font-black text-white hover:bg-blue-600 shadow-lg transition-colors">SETUJUI</button>
                                      </div>
                                   )}
                                </div>
@@ -583,7 +511,7 @@
                          <div className="columns-1 md:columns-2 lg:columns-3 gap-5 space-y-5">
                             {data.laporan.length === 0 ? <div className="p-10 text-center text-slate-400 font-bold">Arsip kosong.</div> : 
                             data.laporan.map(rep => (
-                               <div key={rep.dbId} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm break-inside-avoid">
+                               <div key={rep.id} className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm break-inside-avoid">
                                   <div className="flex justify-between items-center mb-4 border-b border-slate-100 pb-3">
                                      <span className="font-black text-slate-800">{rep.userName}</span>
                                      <span className="text-[10px] font-bold text-slate-400 bg-slate-50 px-2 py-1 rounded-lg"><i className="fas fa-clock mr-1"></i> {rep.date}</span>
