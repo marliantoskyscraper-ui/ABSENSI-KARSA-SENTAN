@@ -5,12 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Aplikasi Absensi Digital Terhubung Google Sheets">
     
-    <!-- TAG ANTI-CACHE -->
-    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <!-- TAG ANTI-CACHE SUPER KUAT -->
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+    <meta http-equiv="Cache-Control" content="post-check=0, pre-check=0">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
 
-    <title>Aplikasi Absensi Terpadu</title>
+    <title>Aplikasi Absensi Terpadu v2.1</title>
     
     <!-- Pustaka Eksternal -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -24,6 +25,8 @@
 
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
+
+        const APP_VERSION = "2.1"; // Indikator versi untuk memastikan update berhasil
 
         // --- 1. FUNGSI UTILITAS ---
         // Penanganan Local Storage 
@@ -209,7 +212,7 @@
             return (
               <>
                 <ModeBanner />
-                <LayarLogin setPenggunaAktif={setPenggunaAktif} dataAkun={akunStorage} aksiDaftar={aksi.daftarAkun} statusCloud={statusCloud} forceRefresh={()=>sinkronisasiData(false)} />
+                <LayarLogin setPenggunaAktif={setPenggunaAktif} dataAkun={akunStorage} aksiDaftar={aksi.daftarAkun} statusCloud={statusCloud} forceRefresh={()=>window.location.reload()} />
               </>
             );
           }
@@ -279,8 +282,12 @@
                 <div className="bg-gradient-to-br from-emerald-600 to-emerald-800 p-8 text-center relative overflow-hidden">
                   <div className="absolute top-0 right-0 -mt-4 -mr-4 w-32 h-32 bg-white opacity-10 rounded-full blur-xl"></div>
                   <i className={`fas ${modeRegister ? 'fa-user-plus' : 'fa-fingerprint'} text-5xl text-white/90 mb-4 drop-shadow-lg relative z-10`}></i>
-                  <h1 className="text-2xl font-black text-white tracking-tight relative z-10">{modeRegister ? 'Buat Akun Baru' : 'Portal Karyawan'}</h1>
-                  <p className="text-emerald-100 mt-1 text-sm font-medium relative z-10">Sistem Absensi Digital</p>
+                  <h1 className="text-2xl font-black text-white tracking-tight relative z-10">
+                    {modeRegister ? 'Buat Akun Baru' : 'Portal Karyawan'}
+                  </h1>
+                  <p className="text-emerald-100 mt-1 text-sm font-medium relative z-10">
+                    Sistem Absensi Digital <span className="bg-emerald-500 text-white text-[10px] px-2 py-0.5 rounded-full ml-1">v{APP_VERSION}</span>
+                  </p>
                 </div>
                 
                 <div className="p-8">
