@@ -35,6 +35,12 @@
         const isApiConfigured = SCRIPT_URL && SCRIPT_URL.startsWith("https://script.google.com/");
 
         // --- 2. FUNGSI UTILITAS ---
+        // Penanganan Local Storage (Fallback jika Sheets belum ada)
+        const getStorage = (key, defaultVal) => {
+            try { const item = localStorage.getItem(key); return item ? JSON.parse(item) : defaultVal; } 
+            catch(e) { return defaultVal; }
+        };
+
         // Menghitung Jarak GPS (Meter)
         function hitungJarakMeter(lat1, lon1, lat2, lon2) {
           const R = 6371000; 
@@ -48,7 +54,6 @@
         // Export Data ke CSV
         function exportKeCSV(data, namaFile) {
             if (!data || data.length === 0) return alert("Tidak ada data untuk diekspor!");
-            // Hapus kolom foto yang sangat panjang jika ada agar excel tidak lag
             const dataBersih = data.map(({ id, foto, timestamp, ...sisa }) => sisa); 
             const header = Object.keys(dataBersih[0]).join(',');
             const baris = dataBersih.map(obj => Object.values(obj).map(val => `"${val}"`).join(',')).join('\n');
@@ -72,16 +77,23 @@
           const [penggunaAktif, setPenggunaAktif] = useState(null); 
           const [notifikasi, setNotifikasi] = useState('');
           
-          const [statusCloud, setStatusCloud] = useState('Menginisialisasi...');
+          const [statusCloud, setStatusCloud] = useState(isApiConfigured ? 'Menginisialisasi...' : 'Mode Lokal Aktif');
           const [isSinkronisasi, setIsSinkronisasi] = useState(false);
 
-          // State Data Sinkronisasi Auto-Polling
-          const [akunStorage, setAkunStorage] = useState([]);
-          const [logs, setLogs] = useState([]);
-          const [pengajuan, setPengajuan] = useState([]);
-          const [laporan, setLaporan] = useState([]);
-          const [lokasiKantor, setLokasiKantor] = useState({ lat: -6.200000, lng: 106.816666 });
+          // State Data (Bisa dari LocalStorage atau Google Sheets)
+          const [akunStorage, setAkunStorage] = useState(() => getStorage('absen_akun', [{ id: 'admin_1', username: 'admin', password: 'Karsa43', name: 'Administrator', role: 'admin' }]));
+          const [logs, setLogs] = useState(() => getStorage('absen_logs', []));
+          const [pengajuan, setPengajuan] = useState(() => getStorage('absen_reqs', []));
+          const [laporan, setLaporan] = useState(() => getStorage('absen_reps', []));
+          const [lokasiKantor, setLokasiKantor] = useState(() => getStorage('absen_loc', { lat: -6.200000, lng: 106.816666 }));
           const BATAS_JARAK_METER = 100;
+
+          // Auto-Save Backup ke Local Storage
+          useEffect(() => { localStorage.setItem('absen_akun', JSON.stringify(akunStorage)); }, [akunStorage]);
+          useEffect(() => { localStorage.setItem('absen_logs', JSON.stringify(logs)); }, [logs]);
+          useEffect(() => { localStorage.setItem('absen_reqs', JSON.stringify(pengajuan)); }, [pengajuan]);
+          useEffect(() => { localStorage.setItem('absen_reps', JSON.stringify(laporan)); }, [laporan]);
+          useEffect(() => { localStorage.setItem('absen_loc', JSON.stringify(lokasiKantor)); }, [lokasiKantor]);
 
           // Fungsi Tarik Data dari Google Sheets (GET)
           const sinkronisasiData = useCallback(async (sembunyiStatus = false) => {
@@ -92,13 +104,12 @@
               try {
                   const respon = await fetch(SCRIPT_URL + "?action=getAll");
                   const hasil = await respon.json();
-                  
                   const urutWaktu = (a, b) => b.timestamp - a.timestamp;
                   
-                  if(hasil.users) setAkunStorage(hasil.users);
-                  if(hasil.logs) setLogs(hasil.logs.sort(urutWaktu));
-                  if(hasil.requests) setPengajuan(hasil.requests.sort(urutWaktu));
-                  if(hasil.reports) setLaporan(hasil.reports.sort(urutWaktu));
+                  if(hasil.users && hasil.users.length > 0) setAkunStorage(hasil.users);
+                  if(hasil.logs && hasil.logs.length > 0) setLogs(hasil.logs.sort(urutWaktu));
+                  if(hasil.requests && hasil.requests.length > 0) setPengajuan(hasil.requests.sort(urutWaktu));
+                  if(hasil.reports && hasil.reports.length > 0) setLaporan(hasil.reports.sort(urutWaktu));
                   if(hasil.settings && hasil.settings.lokasi_kantor) setLokasiKantor(hasil.settings.lokasi_kantor);
 
                   setStatusCloud('Terhubung ke Sheets (Live)');
@@ -110,47 +121,39 @@
               }
           }, []);
 
-          // Simulasi Real-time: Polling Data setiap 5 detik
           useEffect(() => {
               if(!isApiConfigured) return;
-              sinkronisasiData(false); // Fetch awal
-              
-              // Polling: Tarik data terbaru di background setiap 5 detik agar "real-time"
-              const interval = setInterval(() => {
-                  sinkronisasiData(true); 
-              }, 5000); 
-
+              sinkronisasiData(false); 
+              const interval = setInterval(() => { sinkronisasiData(true); }, 8000); 
               return () => clearInterval(interval);
           }, [sinkronisasiData]);
 
-          // EKSEKUSI TULIS DATA (POST ke Google Sheets)
+          // EKSEKUSI TULIS DATA
           const tampilkanToast = (pesan) => { setNotifikasi(pesan); setTimeout(() => setNotifikasi(''), 3000); };
           
           const postDataKeSheet = async (action, data) => {
-             if(!isApiConfigured) return;
+             if(!isApiConfigured) return; // Jika tidak disetup, tetap simpan di lokal
              try {
                 await fetch(SCRIPT_URL, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // text/plain menghindari error CORS
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                     body: JSON.stringify({ action: action, data: data })
                 });
-                sinkronisasiData(true); // Tarik data baru segera setelah menulis
-             } catch(e) {
-                 console.error("Gagal simpan ke sheets", e);
-             }
+                sinkronisasiData(true); 
+             } catch(e) { console.error("Gagal simpan ke sheets", e); }
           };
 
           const aksi = {
              daftarAkun: async (data) => { 
                 const payload = { id: Date.now(), ...data, timestamp: Date.now() };
-                setAkunStorage([...akunStorage, payload]); // Optimistic UI
+                setAkunStorage([...akunStorage, payload]); 
                 await postDataKeSheet('addUser', payload); 
              },
              absen: async (data) => { 
                 const payload = { id: Date.now(), ...data, timestamp: Date.now() };
-                setLogs([payload, ...logs]); // Optimistic UI update
+                setLogs([payload, ...logs]); 
                 await postDataKeSheet('addLog', payload); 
-                tampilkanToast("Absen berhasil dikirim ke Admin!"); 
+                tampilkanToast("Absen berhasil dikirim!"); 
              },
              pengajuan: async (data) => { 
                 const payload = { id: Date.now(), ...data, timestamp: Date.now() };
@@ -181,35 +184,27 @@
              }
           };
 
-          // TAMPILAN ERROR JIKA API BELUM DIISI
-          if (!isApiConfigured) {
-             return (
-               <div className="min-h-screen bg-slate-100 flex flex-col items-center justify-center p-6">
-                  <div className="bg-white max-w-lg w-full rounded-3xl shadow-2xl p-8 text-center border border-rose-200">
-                     <i className="fas fa-file-excel text-6xl text-emerald-500 mb-4 animate-bounce"></i>
-                     <h1 className="text-2xl font-black text-slate-800 mb-2">Setup Google Sheets Diperlukan!</h1>
-                     <p className="text-slate-600 text-sm mb-6 leading-relaxed">
-                        Aplikasi tidak bisa menyimpan data karena <strong>URL Google Script</strong> belum diisi. Anda perlu membuat Web App di Google Apps Script dan menempelkan link-nya ke dalam kode aplikasi ini.
-                     </p>
-                     <div className="bg-slate-800 rounded-xl p-4 text-left overflow-x-auto">
-                        <p className="text-emerald-400 font-mono text-xs mb-2">// Cari dan ganti bagian ini di kode HTML (Baris ke-30):</p>
-                        <code className="text-white font-mono text-xs whitespace-pre">
-                           const SCRIPT_URL = "URL_GOOGLE_SCRIPT_ANDA";
-                        </code>
-                     </div>
-                  </div>
-               </div>
-             )
-          }
+          // Banner Peringatan jika belum set API
+          const ModeBanner = () => !isApiConfigured ? (
+             <div className="bg-amber-500 text-white text-center text-[10px] font-bold py-1 w-full z-50">
+                 MODE UJI COBA (LOKAL) - Harap masukkan URL Google Sheets pada baris 33 untuk sinkronisasi.
+             </div>
+          ) : null;
 
           // RENDER LAYAR LOGIN
           if (!penggunaAktif) {
-            return <LayarLogin setPenggunaAktif={setPenggunaAktif} dataAkun={akunStorage} aksiDaftar={aksi.daftarAkun} statusCloud={statusCloud} isCloudReady={!isSinkronisasi} forceRefresh={()=>sinkronisasiData(false)} />;
+            return (
+              <>
+                <ModeBanner />
+                <LayarLogin setPenggunaAktif={setPenggunaAktif} dataAkun={akunStorage} aksiDaftar={aksi.daftarAkun} statusCloud={statusCloud} forceRefresh={()=>sinkronisasiData(false)} />
+              </>
+            );
           }
 
           // RENDER DASHBOARD
           return (
             <div className="min-h-screen bg-slate-100 pb-20 md:pb-0">
+              <ModeBanner />
               <ToastUI pesan={notifikasi} />
               {penggunaAktif.role === 'admin' ? (
                 <DashboardAdmin 
@@ -233,7 +228,7 @@
         }
 
         // --- 4. KOMPONEN: LAYAR LOGIN & REGISTER ---
-        function LayarLogin({ setPenggunaAktif, dataAkun, aksiDaftar, statusCloud, isCloudReady, forceRefresh }) {
+        function LayarLogin({ setPenggunaAktif, dataAkun, aksiDaftar, statusCloud, forceRefresh }) {
           const [modeRegister, setModeRegister] = useState(false);
           const [form, setForm] = useState({ nama: '', departemen: '', username: '', password: '' });
           const [pesanError, setPesanError] = useState('');
@@ -251,7 +246,6 @@
 
             if (modeRegister) {
                 if (form.username.toLowerCase() === 'admin') return setPesanError('Username tidak valid!');
-                // Tambahkan validasi aman
                 const userExists = dataAkun && dataAkun.some(u => String(u.username).trim() === form.username.trim());
                 if (userExists) return setPesanError('Username sudah digunakan!');
                 
@@ -272,7 +266,7 @@
                   <div className="absolute top-0 right-0 -mt-4 -mr-4 w-32 h-32 bg-white opacity-10 rounded-full blur-xl"></div>
                   <i className={`fas ${modeRegister ? 'fa-user-plus' : 'fa-fingerprint'} text-5xl text-white/90 mb-4 drop-shadow-lg relative z-10`}></i>
                   <h1 className="text-2xl font-black text-white tracking-tight relative z-10">{modeRegister ? 'Buat Akun Baru' : 'Portal Karyawan'}</h1>
-                  <p className="text-emerald-100 mt-1 text-sm font-medium relative z-10">Terkoneksi ke Google Sheets</p>
+                  <p className="text-emerald-100 mt-1 text-sm font-medium relative z-10">Sistem Absensi Digital</p>
                 </div>
                 
                 <div className="p-8">
@@ -289,7 +283,7 @@
                     <input type="text" name="username" required placeholder="Username" value={form.username} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 outline-none focus:border-emerald-500 font-medium text-slate-700 transition-all" />
                     <input type="password" name="password" required placeholder="Password" value={form.password} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3.5 outline-none focus:border-emerald-500 font-medium text-slate-700 transition-all" />
                     
-                    <button type="submit" disabled={!isCloudReady && !modeRegister} className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-400 text-white font-black tracking-wide rounded-xl mt-4 shadow-lg shadow-emerald-600/30 transition-all active:scale-95 flex items-center justify-center">
+                    <button type="submit" className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white font-black tracking-wide rounded-xl mt-4 shadow-lg shadow-emerald-600/30 transition-all active:scale-95 flex items-center justify-center">
                       {modeRegister ? 'DAFTAR SEKARANG' : 'MASUK KE SISTEM'}
                     </button>
                   </form>
@@ -301,8 +295,8 @@
                   </div>
                 </div>
               </div>
-              <div className={`px-5 py-2.5 rounded-full text-xs font-bold flex items-center shadow-sm cursor-pointer ${statusCloud.includes('Terhubung') ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-amber-100 text-amber-700 border border-amber-200'}`} onClick={forceRefresh}>
-                 <i className={`fas ${statusCloud.includes('Terhubung') ? 'fa-check-circle' : 'fa-sync-alt fa-spin'} mr-2`}></i> {statusCloud}
+              <div className={`px-5 py-2.5 rounded-full text-xs font-bold flex items-center shadow-sm cursor-pointer ${statusCloud.includes('Terhubung') || statusCloud.includes('Lokal') ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-amber-100 text-amber-700 border border-amber-200'}`} onClick={forceRefresh}>
+                 <i className={`fas ${statusCloud.includes('Terhubung') || statusCloud.includes('Lokal') ? 'fa-check-circle' : 'fa-sync-alt fa-spin'} mr-2`}></i> {statusCloud}
               </div>
             </div>
           );
@@ -369,7 +363,7 @@
                   const jarakHitung = hitungJarakMeter(pos.coords.latitude, pos.coords.longitude, lokasiKantor.lat, lokasiKantor.lng);
                   setStatusLokasi({ jarak: jarakHitung, pesan: '' });
                 },
-                (err) => setStatusLokasi({ jarak: null, pesan: 'Akses GPS ditolak/gagal. Pastikan izin lokasi aktif.' }),
+                (err) => setStatusLokasi({ jarak: null, pesan: 'Akses ditolak / Error. Periksa Izin Browser.' }),
                 { enableHighAccuracy: true, timeout: 10000 }
               );
             } else setStatusLokasi({ jarak: null, pesan: 'Browser tidak mendukung GPS.' });
@@ -388,8 +382,12 @@
           }, [kamera.aktif, kamera.fotoB64]);
 
           const bukaKamera = (jenisAbsen) => {
-            if (statusLokasi.pesan) return showToast("Sinyal GPS belum ditemukan/aktif!");
-            if (statusLokasi.jarak > batasJarak) showToast(`Anda di luar kantor (${statusLokasi.jarak}m). Log akan ditandai!`);
+            // BYPASS PENTING: Jangan blokir jika GPS error, cukup beri peringatan.
+            if (statusLokasi.pesan) {
+                showToast("Peringatan: GPS Gagal! Absen tetap bisa dilakukan (Status: Lokasi Tidak Diketahui)");
+            } else if (statusLokasi.jarak > batasJarak) {
+                showToast(`Anda di luar kantor (${statusLokasi.jarak}m). Log ditandai luar jangkauan!`);
+            }
             setKamera({ aktif: true, jenis: jenisAbsen, fotoB64: null });
           };
 
@@ -397,8 +395,7 @@
             if (!refVideo.current) return;
             const cvs = document.createElement('canvas');
             
-            // KOMPRESI EKSTRA: Google Sheets membatasi teks 50ribu karakter per sel
-            // Kita harus mengecilkan dimensi foto agar Base64 muat di Sheets
+            // KOMPRESI EKSTRA
             const MAX_WIDTH = 250; 
             const scaleSize = MAX_WIDTH / refVideo.current.videoWidth;
             cvs.width = MAX_WIDTH;
@@ -408,14 +405,19 @@
             const base64 = cvs.toDataURL('image/jpeg', 0.4); 
             
             setKamera({ ...kamera, fotoB64: base64 });
+
+            // Menentukan Status GPS pada saat absen
+            let statusPenilaian = 'Tepat Lokasi';
+            if (statusLokasi.pesan) statusPenilaian = 'GPS Tidak Aktif';
+            else if (statusLokasi.jarak > batasJarak) statusPenilaian = 'Luar Jangkauan';
             
             aksiAbsen({
                userName: user.name || user.nama, 
                type: kamera.jenis, 
-               foto: base64, // Ganti key agar di eksport gampang di buang
+               foto: base64, 
                date: new Date().toLocaleDateString('id-ID'), 
                time: new Date().toLocaleTimeString('id-ID'),
-               status: statusLokasi.jarak <= batasJarak ? 'Tepat Lokasi' : 'Luar Jangkauan'
+               status: statusPenilaian
             });
             setTimeout(() => setKamera({ aktif: false, jenis: '', fotoB64: null }), 1200);
           };
@@ -434,7 +436,7 @@
                   <div className="h-32 bg-slate-900 flex justify-center items-center pb-6">
                      {!kamera.fotoB64 ? (
                         <button onClick={jepretFoto} className="w-20 h-20 bg-white rounded-full border-4 border-slate-500 flex items-center justify-center active:scale-95 transition-transform"><div className="w-16 h-16 border-2 border-slate-900 rounded-full"></div></button>
-                     ) : <div className="text-emerald-400 font-bold flex flex-col items-center animate-pulse"><i className="fas fa-cloud-upload-alt text-3xl mb-1"></i>Ke Sheets...</div>}
+                     ) : <div className="text-emerald-400 font-bold flex flex-col items-center animate-pulse"><i className="fas fa-cloud-upload-alt text-3xl mb-1"></i>Menyimpan...</div>}
                   </div>
                </div>
              );
@@ -490,7 +492,6 @@
               <div className="space-y-4">
                  <h2 className="font-black text-slate-800 text-lg border-b-2 border-slate-100 pb-2 flex items-center">
                     {tipe === 'pengajuan' ? 'Form Izin & Cuti' : 'Laporan Pekerjaan'}
-                    <i className="fas fa-file-excel text-emerald-400 text-xs ml-2" title="Tersimpan ke Sheets"></i>
                  </h2>
                  <form onSubmit={kirim} className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm space-y-4">
                     {tipe === 'pengajuan' ? (
@@ -542,7 +543,7 @@
                 <div className="w-64 bg-slate-900 text-white hidden md:flex flex-col shadow-2xl z-20">
                    <div className="p-6 border-b border-slate-800 flex items-center">
                       <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center mr-3 shadow-lg shadow-emerald-500/50"><i className="fas fa-file-excel text-xl"></i></div>
-                      <div><h1 className="font-black text-lg leading-tight">AdminHub</h1><p className="text-[9px] font-bold text-emerald-400 uppercase tracking-widest mt-0.5"><i className="fas fa-wifi mr-1"></i>Sheets API</p></div>
+                      <div><h1 className="font-black text-lg leading-tight">AdminHub</h1><p className="text-[9px] font-bold text-emerald-400 uppercase tracking-widest mt-0.5"><i className="fas fa-wifi mr-1"></i>Sistem Database</p></div>
                    </div>
                    <div className="flex-1 py-6 px-4 space-y-2">
                       {MenuSidebar.map(menu => (
@@ -553,7 +554,7 @@
                       <div className="pt-8">
                          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest px-4 mb-2">Konfigurasi</p>
                          <button onClick={()=>setModalLokasi(true)} className="w-full flex items-center px-4 py-2.5 rounded-xl text-sm font-bold text-slate-400 hover:bg-slate-800 hover:text-white transition-all"><i className="fas fa-map-marker-alt w-6 text-left"></i> Kordinat Kantor</button>
-                         <button onClick={()=>{ if(window.confirm('Yakin hapus SEMUA riwayat absen di Cloud?')) aksi.resetAbsen(); }} className="w-full flex items-center px-4 py-2.5 rounded-xl text-sm font-bold text-rose-400 hover:bg-rose-500/10 transition-all mt-1"><i className="fas fa-trash-alt w-6 text-left"></i> Kosongkan Log</button>
+                         <button onClick={()=>{ if(window.confirm('Yakin hapus SEMUA riwayat absen di Database?')) aksi.resetAbsen(); }} className="w-full flex items-center px-4 py-2.5 rounded-xl text-sm font-bold text-rose-400 hover:bg-rose-500/10 transition-all mt-1"><i className="fas fa-trash-alt w-6 text-left"></i> Kosongkan Log</button>
                       </div>
                    </div>
                    <div className="p-4"><button onClick={onLogout} className="w-full py-3 bg-slate-800 text-slate-300 font-bold rounded-xl hover:bg-rose-600 hover:text-white transition-all flex items-center justify-center"><i className="fas fa-power-off mr-2"></i> KELUAR</button></div>
@@ -576,7 +577,7 @@
                          <div>
                             <h2 className="text-2xl md:text-3xl font-black text-slate-800 tracking-tight">{MenuSidebar.find(i=>i.id===tabAktif)?.judul || 'Pengaturan'}</h2>
                             <div className="flex items-center mt-1">
-                                <p className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center mr-3"><i className="fas fa-table text-emerald-500 mr-2"></i>Google Sheets DB</p>
+                                <p className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center mr-3"><i className="fas fa-table text-emerald-500 mr-2"></i>Database Aktif</p>
                                 {isSinkron && <span className="text-[10px] font-bold text-emerald-500 bg-emerald-50 px-2 py-0.5 rounded-full flex items-center"><i className="fas fa-sync fa-spin mr-1"></i> Sinkronisasi...</span>}
                             </div>
                          </div>
@@ -597,13 +598,13 @@
                                      </tr>
                                   </thead>
                                   <tbody className="divide-y divide-slate-50">
-                                     {data.logs.length === 0 ? <tr><td colSpan="5" className="p-12 text-center text-slate-400 font-bold"><i className="fas fa-folder-open text-4xl mb-3 block opacity-20"></i>Belum ada data masuk di Sheets.</td></tr> : 
+                                     {data.logs.length === 0 ? <tr><td colSpan="5" className="p-12 text-center text-slate-400 font-bold"><i className="fas fa-folder-open text-4xl mb-3 block opacity-20"></i>Belum ada data masuk di Server.</td></tr> : 
                                      data.logs.map((lg, idx) => (
                                         <tr key={lg.id || idx} className="hover:bg-slate-50/50 transition-colors">
                                            <td className="p-5 pl-6 font-black text-slate-800 text-sm">{lg.userName}</td>
                                            <td className="p-5 text-xs font-bold text-slate-500"><i className="far fa-calendar-alt mr-1"></i> {lg.date} <span className="mx-1 text-slate-300">|</span> <i className="far fa-clock mr-1"></i> {lg.time}</td>
                                            <td className="p-5"><span className={`px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider ${lg.type && lg.type.includes('Masuk') ? 'bg-emerald-100 text-emerald-700' : lg.type && lg.type.includes('Pulang') ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>{lg.type}</span></td>
-                                           <td className="p-5"><span className={`text-xs font-black flex items-center ${lg.status==='Tepat Lokasi'?'text-emerald-500':'text-rose-500'}`}><i className={`fas ${lg.status==='Tepat Lokasi'?'fa-check-circle':'fa-times-circle'} mr-1.5`}></i>{lg.status==='Tepat Lokasi'?'VALID (GPS)':'DITOLAK (Luar Radius)'}</span></td>
+                                           <td className="p-5"><span className={`text-xs font-black flex items-center ${lg.status==='Tepat Lokasi'?'text-emerald-500':'text-rose-500'}`}><i className={`fas ${lg.status==='Tepat Lokasi'?'fa-check-circle': lg.status==='GPS Tidak Aktif' ? 'fa-exclamation-triangle' : 'fa-times-circle'} mr-1.5`}></i>{lg.status}</span></td>
                                            <td className="p-5 pr-6 flex justify-end">
                                              {lg.foto ? (
                                              <div className="w-10 h-10 rounded-xl overflow-hidden border-2 border-slate-100 shadow-sm bg-slate-50 hover:scale-[2] hover:-translate-x-4 transition-transform origin-right cursor-zoom-in">
@@ -677,7 +678,7 @@
                                   <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Garis Lintang (Latitude)</label><input type="number" step="any" value={formLokasi.lat} onChange={(e)=>setFormLokasi({...formLokasi, lat: parseFloat(e.target.value)})} className="w-full border-2 border-slate-100 rounded-xl bg-slate-50 p-4 outline-none focus:border-emerald-500 font-bold text-slate-700 transition-colors" /></div>
                                   <div><label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Garis Bujur (Longitude)</label><input type="number" step="any" value={formLokasi.lng} onChange={(e)=>setFormLokasi({...formLokasi, lng: parseFloat(e.target.value)})} className="w-full border-2 border-slate-100 rounded-xl bg-slate-50 p-4 outline-none focus:border-emerald-500 font-bold text-slate-700 transition-colors" /></div>
                                </div>
-                               <button onClick={()=>{ aksi.updateLokasi(formLokasi); setModalLokasi(false); }} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-4 rounded-xl shadow-lg mt-8 transition-all active:scale-95">SIMPAN KE SHEETS</button>
+                               <button onClick={()=>{ aksi.updateLokasi(formLokasi); setModalLokasi(false); }} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-4 rounded-xl shadow-lg mt-8 transition-all active:scale-95">SIMPAN PENGATURAN</button>
                             </div>
                          </div>
                       </div>
