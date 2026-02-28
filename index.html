@@ -40,16 +40,35 @@
 
         const { useState, useEffect, useRef } = React;
 
-        // --- 1. INISIALISASI DATABASE CLOUD ---
-        // Catatan: Variabel ini disediakan oleh sistem saat live preview. 
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
+        // =====================================================================
+        // 1. INISIALISASI DATABASE CLOUD
+        // =====================================================================
+        
+        const userConfig = {
+          apiKey: "AIzaSyCci13hFIOwTAdF0kt6YxEVeaYAJ-HtdmM",
+          authDomain: "absensi-karyawan-lamandau.firebaseapp.com",
+          projectId: "absensi-karyawan-lamandau",
+          storageBucket: "absensi-karyawan-lamandau.firebasestorage.app",
+          messagingSenderId: "506937684629",
+          appId: "1:506937684629:web:577ea880266a50f460e19c",
+          measurementId: "G-6RNXN2XJKP"
+        };
+
+        // Deteksi cerdas: Apakah berjalan di Canvas Preview atau di Github Pages?
+        const isCanvasEnv = typeof __firebase_config !== 'undefined' && typeof __initial_auth_token !== 'undefined';
+        const activeConfig = isCanvasEnv ? JSON.parse(__firebase_config) : userConfig;
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'sistem-absensi-final';
 
+        let app, auth, db;
+        try {
+            app = initializeApp(activeConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+        } catch (error) {
+            console.error("Gagal inisialisasi Firebase:", error);
+        }
+
         // --- 2. FUNGSI UTILITAS ---
-        // Menghitung Jarak GPS (Meter) antara HP Karyawan & Titik Kantor Admin
         function hitungJarakMeter(lat1, lon1, lat2, lon2) {
           const R = 6371000; 
           const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -59,7 +78,6 @@
           return Math.round(R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)))); 
         }
 
-        // Export Data ke CSV (Untuk Google Sheets / Excel)
         function exportKeCSV(data, namaFile) {
             if (!data || data.length === 0) return alert("Tidak ada data untuk diekspor!");
             const dataBersih = data.map(({ dbId, photo, timestamp, ...sisa }) => sisa); 
@@ -70,7 +88,6 @@
             link.href = URL.createObjectURL(blob); link.download = namaFile; link.click();
         }
 
-        // Komponen Toast Global (Notifikasi Mengambang)
         const ToastUI = ({ pesan }) => {
             if (!pesan) return null;
             return (
@@ -80,16 +97,15 @@
             );
         };
 
-        // --- 3. KOMPONEN UTAMA (Aplikasi Root) ---
+        // --- 3. KOMPONEN UTAMA ---
         function AplikasiAbsensi() {
           const [penggunaAktif, setPenggunaAktif] = useState(null); 
           const [notifikasi, setNotifikasi] = useState('');
           
-          // State Cloud Auth & Status
           const [firebaseUser, setFirebaseUser] = useState(null);
           const [statusCloud, setStatusCloud] = useState('Menghubungkan ke server...');
+          const [authErrorMsg, setAuthErrorMsg] = useState('');
 
-          // State Data Sinkronisasi Real-time
           const [akunStorage, setAkunStorage] = useState([]);
           const [logs, setLogs] = useState([]);
           const [pengajuan, setPengajuan] = useState([]);
@@ -97,34 +113,46 @@
           const [lokasiKantor, setLokasiKantor] = useState({ lat: -6.200000, lng: 106.816666 });
           const BATAS_JARAK_METER = 100;
 
-          // SETUP AUTENTIKASI SERVER (Wajib sebelum tarik data)
+          // SETUP AUTENTIKASI SERVER 
           useEffect(() => {
             const jalankanAuth = async () => {
               try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                if (isCanvasEnv && typeof __initial_auth_token !== 'undefined') {
+                  // Gunakan token internal untuk Canvas Preview
                   await signInWithCustomToken(auth, __initial_auth_token);
                 } else {
+                  // Gunakan Anonymous Login untuk project milik Anda di Github Pages
                   await signInAnonymously(auth);
                 }
-              } catch (err) { console.error("Gagal Auth", err); setStatusCloud('Koneksi Gagal'); }
+              } catch (err) { 
+                  console.error("Gagal Auth", err); 
+                  setStatusCloud('Koneksi Gagal');
+                  if (err.code === 'auth/configuration-not-found' || err.code === 'auth/operation-not-allowed') {
+                      setAuthErrorMsg('TINDAKAN DIPERLUKAN: Mohon aktifkan penyedia log masuk "Anonymous" (Anonim) di menu Authentication Firebase Anda agar database dapat berfungsi.');
+                  } else {
+                      setAuthErrorMsg('Terjadi kendala saat menghubungi Firebase: ' + err.message);
+                  }
+              }
             };
             jalankanAuth();
             
             const unsub = onAuthStateChanged(auth, (user) => {
                setFirebaseUser(user);
-               if(user) setStatusCloud('Sistem Terkoneksi (Live)');
+               if(user) { setStatusCloud('Sistem Terkoneksi (Live)'); setAuthErrorMsg(''); }
             });
             return () => unsub();
           }, []);
 
-          // TARIK DATA REAL-TIME DARI CLOUD (Hanya jalan setelah Auth berhasil)
+          // TARIK DATA REAL-TIME
           useEffect(() => {
             if (!firebaseUser) return;
             
-            const reqErr = (err) => console.error("Fetch Error:", err);
+            const reqErr = (err) => {
+                console.error("Fetch Error:", err);
+                if(err.code === 'permission-denied') setAuthErrorMsg('TINDAKAN DIPERLUKAN: Aturan (Rules) Firestore Anda saat ini memblokir akses. Ubah rules menjadi mode uji (Test Mode).');
+            };
             const urutWaktu = (a, b) => b.timestamp - a.timestamp;
 
-            // Langganan (Subscribe) ke perubahan data di database
             const unsubAkun = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'users'), snap => {
                 setAkunStorage(snap.docs.map(d => ({ dbId: d.id, ...d.data() })));
             }, reqErr);
@@ -149,7 +177,7 @@
             return () => { unsubAkun(); unsubLogs(); unsubReqs(); unsubReps(); unsubSet(); };
           }, [firebaseUser]);
 
-          // EKSEKUSI TULIS DATA KE CLOUD (Write)
+          // EKSEKUSI TULIS DATA
           const tampilkanToast = (pesan) => { setNotifikasi(pesan); setTimeout(() => setNotifikasi(''), 3000); };
           
           const simpanKeCloud = async (koleksi, data) => {
@@ -161,8 +189,14 @@
              absen: async (data) => { await simpanKeCloud('logs', data); tampilkanToast("Absen berhasil dikirim ke Admin!"); },
              pengajuan: async (data) => { await simpanKeCloud('requests', data); tampilkanToast("Pengajuan terkirim ke Admin!"); },
              laporan: async (data) => { await simpanKeCloud('reports', data); tampilkanToast("Laporan harian tersimpan!"); },
-             updateStatus: async (dbId, status) => { await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'requests', dbId), { status }); tampilkanToast("Status diperbarui!"); },
-             updateLokasi: async (koordinat) => { await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'lokasi_kantor'), koordinat); tampilkanToast("Pusat GPS Kantor Diperbarui!"); },
+             updateStatus: async (dbId, status) => { 
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'requests', dbId), { status }); 
+                tampilkanToast("Status diperbarui!"); 
+             },
+             updateLokasi: async (koordinat) => { 
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'lokasi_kantor'), koordinat); 
+                tampilkanToast("Pusat GPS Kantor Diperbarui!"); 
+             },
              resetAbsen: async () => {
                 const snap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', 'logs'));
                 snap.forEach(async (d) => await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'logs', d.id)));
@@ -170,12 +204,12 @@
              }
           };
 
-          // RENDER LAYAR LOGIN JIKA BELUM MASUK
+          // RENDER LAYAR LOGIN
           if (!penggunaAktif) {
-            return <LayarLogin setPenggunaAktif={setPenggunaAktif} dataAkun={akunStorage} aksiDaftar={aksi.daftarAkun} statusCloud={statusCloud} isCloudReady={!!firebaseUser} />;
+            return <LayarLogin setPenggunaAktif={setPenggunaAktif} dataAkun={akunStorage} aksiDaftar={aksi.daftarAkun} statusCloud={statusCloud} isCloudReady={!!firebaseUser} authErrorMsg={authErrorMsg} />;
           }
 
-          // RENDER DASHBOARD BERDASARKAN ROLE
+          // RENDER DASHBOARD
           return (
             <div className="min-h-screen bg-slate-100 pb-20 md:pb-0">
               <ToastUI pesan={notifikasi} />
@@ -198,7 +232,7 @@
         }
 
         // --- 4. KOMPONEN: LAYAR LOGIN & REGISTER ---
-        function LayarLogin({ setPenggunaAktif, dataAkun, aksiDaftar, statusCloud, isCloudReady }) {
+        function LayarLogin({ setPenggunaAktif, dataAkun, aksiDaftar, statusCloud, isCloudReady, authErrorMsg }) {
           const [modeRegister, setModeRegister] = useState(false);
           const [form, setForm] = useState({ nama: '', departemen: '', username: '', password: '' });
           const [pesanError, setPesanError] = useState('');
@@ -212,7 +246,6 @@
 
             if (!isCloudReady) return setPesanError('Tunggu hingga sistem terhubung ke Cloud...');
 
-            // Cek Khusus Admin
             if (!modeRegister && form.username === 'admin' && form.password === 'Karsa43') {
                 return setPenggunaAktif({ id: 'admin_1', username: 'admin', name: 'Administrator', role: 'admin' });
             }
@@ -242,6 +275,7 @@
                 </div>
                 
                 <div className="p-8">
+                  {authErrorMsg && <div className="mb-4 bg-rose-50 text-rose-700 p-4 rounded-xl text-xs font-bold border-2 border-rose-200 leading-relaxed"><i className="fas fa-exclamation-circle mr-2 text-lg"></i>{authErrorMsg}</div>}
                   {pesanError && <div className="mb-4 bg-rose-50 text-rose-600 p-3 rounded-xl text-sm font-semibold border border-rose-100 flex items-center"><i className="fas fa-exclamation-triangle mr-2"></i>{pesanError}</div>}
                   {pesanSukses && <div className="mb-4 bg-emerald-50 text-emerald-600 p-3 rounded-xl text-sm font-semibold border border-emerald-100 flex items-center"><i className="fas fa-check mr-2"></i>{pesanSukses}</div>}
 
@@ -319,7 +353,6 @@
           );
         }
 
-        // --- SUB-KOMPONEN KARYAWAN ---
         function FiturAbsensi({ user, lokasiKantor, batasJarak, aksiAbsen, showToast }) {
           const [statusLokasi, setStatusLokasi] = useState({ jarak: null, pesan: 'Mencari sinyal GPS...' });
           const [kamera, setKamera] = useState({ aktif: false, jenis: '', fotoB64: null });
@@ -330,7 +363,6 @@
             if (navigator.geolocation) {
               navigator.geolocation.getCurrentPosition(
                 (pos) => {
-                  // Hitung jarak berdasarkan GPS HP Karyawan dengan Setingan Admin (lokasiKantor)
                   const jarakHitung = hitungJarakMeter(pos.coords.latitude, pos.coords.longitude, lokasiKantor.lat, lokasiKantor.lng);
                   setStatusLokasi({ jarak: jarakHitung, pesan: '' });
                 },
@@ -366,8 +398,6 @@
             const base64 = cvs.toDataURL('image/jpeg', 0.5); 
             
             setKamera({ ...kamera, fotoB64: base64 });
-            
-            // Simpan Data Ke Cloud Database
             aksiAbsen({
                userName: user.name, type: kamera.jenis, photo: base64,
                date: new Date().toLocaleDateString('id-ID'), time: new Date().toLocaleTimeString('id-ID'),
