@@ -11,7 +11,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
 
-    <title>Aplikasi Absensi Terpadu v2.1</title>
+    <title>Aplikasi Absensi Terpadu v2.2</title>
     
     <!-- Pustaka Eksternal -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -26,7 +26,7 @@
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback } = React;
 
-        const APP_VERSION = "2.1"; // Indikator versi untuk memastikan update berhasil
+        const APP_VERSION = "2.2"; // Pembaruan Bypass CORS & Delay Sinkronisasi
 
         // --- 1. FUNGSI UTILITAS ---
         // Penanganan Local Storage 
@@ -137,16 +137,23 @@
               return () => clearInterval(interval);
           }, [sinkronisasiData, isApiConfigured]);
 
-          // POST Data ke Google Sheets
+          // POST Data ke Google Sheets (DENGAN BYPASS CORS)
           const postDataKeSheet = async (action, data) => {
              if(!isApiConfigured) return;
              try {
                 await fetch(scriptUrl, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    mode: 'no-cors', // Mencegah pemblokiran browser
+                    headers: { 'Content-Type': 'text/plain' },
                     body: JSON.stringify({ action: action, data: data })
                 });
-                sinkronisasiData(true); 
+                
+                // Google Sheets butuh waktu sekitar 1-2 detik untuk memproses script dan menulis baris baru.
+                // Jika ditarik langsung, datanya belum ada. Berikan jeda 2 detik sebelum sinkronisasi.
+                setTimeout(() => {
+                    sinkronisasiData(true); 
+                }, 2000);
+
              } catch(e) { 
                  console.error("Gagal POST ke sheets", e); 
                  tampilkanToast("Terjadi kendala jaringan saat menyimpan ke Sheets.");
@@ -155,30 +162,30 @@
 
           const aksi = {
              daftarAkun: async (data) => { 
-                const payload = { id: Date.now(), ...data, timestamp: Date.now() };
-                setAkunStorage([...akunStorage, payload]); 
+                const payload = { id: Date.now(), dbId: Date.now().toString(), ...data, timestamp: Date.now() };
+                setAkunStorage(prev => [...prev, payload]); 
                 await postDataKeSheet('addUser', payload); 
              },
              absen: async (data) => { 
-                const payload = { id: Date.now(), ...data, timestamp: Date.now() };
-                setLogs([payload, ...logs]); 
+                const payload = { id: Date.now(), dbId: Date.now().toString(), ...data, timestamp: Date.now() };
+                setLogs(prev => [payload, ...prev]); 
                 await postDataKeSheet('addLog', payload); 
                 tampilkanToast("Absen berhasil dikirim!"); 
              },
              pengajuan: async (data) => { 
-                const payload = { id: Date.now(), ...data, timestamp: Date.now() };
-                setPengajuan([payload, ...pengajuan]);
+                const payload = { id: Date.now(), dbId: Date.now().toString(), ...data, timestamp: Date.now() };
+                setPengajuan(prev => [payload, ...prev]);
                 await postDataKeSheet('addRequest', payload); 
                 tampilkanToast("Pengajuan terkirim ke Admin!"); 
              },
              laporan: async (data) => { 
-                const payload = { id: Date.now(), ...data, timestamp: Date.now() };
-                setLaporan([payload, ...laporan]);
+                const payload = { id: Date.now(), dbId: Date.now().toString(), ...data, timestamp: Date.now() };
+                setLaporan(prev => [payload, ...prev]);
                 await postDataKeSheet('addReport', payload); 
                 tampilkanToast("Laporan harian tersimpan!"); 
              },
              updateStatus: async (id, status) => { 
-                setPengajuan(pengajuan.map(p => p.id == id ? {...p, status} : p));
+                setPengajuan(prev => prev.map(p => p.id == id || p.dbId == id ? {...p, status} : p));
                 await postDataKeSheet('updateRequestStatus', { id, status }); 
                 tampilkanToast("Status diperbarui!"); 
              },
@@ -212,7 +219,7 @@
             return (
               <>
                 <ModeBanner />
-                <LayarLogin setPenggunaAktif={setPenggunaAktif} dataAkun={akunStorage} aksiDaftar={aksi.daftarAkun} statusCloud={statusCloud} forceRefresh={()=>window.location.reload()} />
+                <LayarLogin setPenggunaAktif={setPenggunaAktif} dataAkun={akunStorage} aksiDaftar={aksi.daftarAkun} statusCloud={statusCloud} forceRefresh={()=>sinkronisasiData(false)} />
               </>
             );
           }
@@ -622,7 +629,7 @@
                                      </tr>
                                   </thead>
                                   <tbody className="divide-y divide-slate-50">
-                                     {data.logs.length === 0 ? <tr><td colSpan="5" className="p-12 text-center text-slate-400 font-bold"><i className="fas fa-folder-open text-4xl mb-3 block opacity-20"></i>Belum ada data masuk.</td></tr> : 
+                                     {data.logs.length === 0 ? <tr><td colSpan="5" className="p-12 text-center text-slate-400 font-bold"><i className="fas fa-folder-open text-4xl mb-3 block opacity-20"></i>Belum ada data masuk di Sheets.</td></tr> : 
                                      data.logs.map((lg, idx) => (
                                         <tr key={lg.id || idx} className="hover:bg-slate-50/50 transition-colors">
                                            <td className="p-5 pl-6 font-black text-slate-800 text-sm">{lg.userName}</td>
